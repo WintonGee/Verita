@@ -16,11 +16,13 @@ ALLOWED_UNSAFE_FILES = {
     "tests/test_tenant_scoping.py",  # the tests that verify both branches
     "tests/test_unsafe_allowlist.py",  # this file (it's quoting the method name)
     "tests/test_concurrency.py",  # concurrency tests count Event rows across tenants
-    # Production allowlist (filled in as we implement them):
-    # "apps/billing/management/commands/aggregate_events.py",
-    # "apps/billing/management/commands/issue_invoices.py",
+    "tests/test_invoicer.py",     # invoicer tests seed events/credits without a request scope
+    "tests/test_aggregator.py",   # aggregator tests seed events without a request scope
+    # Production allowlist — system contexts with legitimate cross-tenant scope:
+    "apps/api/views_webhooks.py",  # payment webhook has no tenant; looks up invoice by id
+    "apps/billing/management/commands/seed.py",  # admin script: resets all tenants
     # "apps/billing/management/commands/run_reconciliation.py",
-    # "apps/ops_api/views.py",
+    # "apps/api/views_ops.py",
 }
 
 

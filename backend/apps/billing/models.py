@@ -15,6 +15,21 @@ from django.db import models
 from .managers import CustomerScopedManager
 
 
+# --- Cron state (background-job watermarks) ----------------------------------
+
+class CronState(models.Model):
+    """
+    One row per scheduled task, tracking the watermark for incremental work.
+    Not tenant-scoped — it's infrastructure state, queried with plain .objects.
+    """
+    name = models.CharField(max_length=64, primary_key=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "cron_state"
+
+
 # --- Pricing -----------------------------------------------------------------
 
 class PricePlan(models.Model):

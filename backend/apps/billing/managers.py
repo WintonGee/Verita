@@ -47,3 +47,15 @@ class CustomerScopedManager(models.Manager):
         Grep for this method name to enumerate all call sites.
         """
         return super().get_queryset()
+
+    # --- Writes -------------------------------------------------------------
+    # Writes always require an explicit `customer` kwarg, so they cannot leak
+    # another tenant's data. They bypass the read trap (get_queryset) so the
+    # normal ORM ergonomics keep working. The footgun we're guarding against
+    # is READS that forget a scope, not writes.
+
+    def create(self, **kwargs):
+        return super().get_queryset().create(**kwargs)
+
+    def bulk_create(self, objs, *args, **kwargs):
+        return super().get_queryset().bulk_create(objs, *args, **kwargs)
