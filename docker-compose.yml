@@ -1,0 +1,74 @@
+# Verita — local dev. Three services + cron sidecar (added once backend exists).
+#
+#   postgres:  the database, with role-split init scripts mounted
+#   backend:   Django + DRF. Migrates as migrator_role, runs as app_role.
+#   cron:      sidecar that dispatches scheduled management commands
+#   (frontends run via Vite dev servers outside compose for fast HMR; see README)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-verita}
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-postgres}
+      APP_ROLE_PASSWORD: ${APP_ROLE_PASSWORD:-app_pass}
+      MIGRATOR_ROLE_PASSWORD: ${MIGRATOR_ROLE_PASSWORD:-migrator_pass}
+    volumes:
+      - ./ops/postgres/init:/docker-entrypoint-initdb.d:ro
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPERUSER:-postgres} -d ${POSTGRES_DB:-verita}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: >
+      sh -c "
+        python manage.py migrate --database=migrator &&
+        python manage.py runserver 0.0.0.0:8000
+      "
+    healthcheck:
+      # Healthy only once migrations have run and the server is serving, so
+      # `docker compose up -d --wait` blocks until the API is actually ready
+      # (and seeding in a separate container can't race the migration).
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  cron:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: python cron_runner.py
+
+volumes:
+  pg_data:
