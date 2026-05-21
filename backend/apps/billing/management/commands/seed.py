@@ -81,6 +81,7 @@ class Command(BaseCommand):
         if options["reset"]:
             self._reset()
 
+        self._ensure_demo_staff()
         plan = self._create_price_plan()
 
         total_events = 0
@@ -141,6 +142,16 @@ class Command(BaseCommand):
             # ingested_at, so a stale watermark would make the incremental scan
             # skip them.
             CronState.objects.all().delete()
+
+    # --- Demo staff ----------------------------------------------------------
+
+    def _ensure_demo_staff(self):
+        """Create a demo ops staff user so the ops console is usable immediately.
+        Demo-only credentials — replace in any real environment."""
+        from django.contrib.auth.models import User
+        if not User.objects.filter(username="ops").exists():
+            User.objects.create_superuser("ops", "ops@verita.local", "ops-pass-123")
+        self.stdout.write("ops staff login: ops / ops-pass-123")
 
     # --- Pricing -------------------------------------------------------------
 

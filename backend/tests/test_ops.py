@@ -58,6 +58,17 @@ def test_customer_detail_has_anomaly_signal(ops_client, customer_a):
     assert "anomaly" in resp.data["current_period"]
 
 
+@pytest.mark.django_db
+def test_customer_detail_embeds_line_items(ops_client, issued_invoice, customer_a):
+    """The ops console drives the override flow off embedded line items."""
+    resp = ops_client.get(f"/ops/customers/{customer_a.id}")
+    assert resp.status_code == 200
+    inv = next(i for i in resp.data["invoices"] if str(i["id"]) == str(issued_invoice.id))
+    assert "line_items" in inv
+    assert len(inv["line_items"]) == 1
+    assert inv["line_items"][0]["amount_micro_cents"] == 90 * MICRO_CENTS_PER_USD
+
+
 # --- Credit issuance + idempotency -------------------------------------------
 
 @pytest.mark.django_db

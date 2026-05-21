@@ -37,6 +37,21 @@ def test_no_drift_on_healthy_data(customer_a, api_key_a):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_no_false_drift_across_reconciliation_horizon(customer_a, api_key_a):
+    """
+    Regression: the drift query must not slice the boundary hour. Events older
+    than the 7-day horizon, correctly aggregated, must not be reported as drift
+    (an earlier version filtered events by timestamp and double-flagged the
+    boundary window).
+    """
+    now = timezone.now()
+    _make_event(customer_a, api_key_a, 5, now - timedelta(days=8, hours=3))
+    _make_event(customer_a, api_key_a, 7, now - timedelta(hours=2))
+    run_aggregation(now=now + timedelta(minutes=10), catch_up=True)
+    assert check_window_drift() == []
+
+
+@pytest.mark.django_db(transaction=True)
 def test_window_drift_detected_when_corrupted(customer_a, api_key_a):
     hour = timezone.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
     _make_event(customer_a, api_key_a, 10, hour + timedelta(minutes=5))

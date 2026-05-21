@@ -2,6 +2,7 @@
 
 from rest_framework import serializers
 
+from apps.api.serializers_read import LineItemSerializer
 from apps.billing.models import Invoice
 from apps.tenancy.models import ApiKey, Customer
 
@@ -21,10 +22,15 @@ class OpsApiKeySerializer(serializers.ModelSerializer):
 
 
 class OpsInvoiceSerializer(serializers.ModelSerializer):
+    # Line items are embedded so the ops console can drive the override flow
+    # without a second round-trip. Bounded (last 12 invoices × a few lines each).
+    line_items = LineItemSerializer(many=True, read_only=True)
+
     class Meta:
         model = Invoice
         fields = ["id", "period_start", "period_end", "status",
-                  "total_micro_cents", "currency", "issued_at", "paid_at"]
+                  "total_micro_cents", "currency", "issued_at", "paid_at",
+                  "line_items"]
 
 
 class IssueCreditSerializer(serializers.Serializer):

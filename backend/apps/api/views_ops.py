@@ -16,6 +16,8 @@ from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.db.models.functions import TruncDay
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework import generics, status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import IsAdminUser
@@ -66,7 +68,10 @@ class OpsLogoutView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@method_decorator(ensure_csrf_cookie, name="dispatch")
 class OpsMeView(APIView):
+    # Sets the csrftoken cookie so the SPA can send X-CSRFToken on mutations
+    # (DRF SessionAuthentication enforces CSRF on unsafe methods).
     authentication_classes = [SessionAuthentication]
     permission_classes = [IsAdminUser]
 
@@ -139,6 +144,7 @@ class OpsCustomerDetailView(APIView):
                 status=status.HTTP_404_NOT_FOUND)
 
         invoices = (Invoice.objects.for_customer(customer)
+                    .prefetch_related("line_items")
                     .order_by("-period_start")[:12])
         api_keys = ApiKey.objects.filter(customer=customer).order_by("-created_at")
 

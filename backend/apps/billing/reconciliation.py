@@ -24,22 +24,27 @@ def check_window_drift(since_days=7) -> list[dict]:
     state.
     """
     since = timezone.now() - timedelta(days=since_days)
+    # Iterate from usage_window (the entity we're validating) and sum ALL of
+    # each window's events via a LEFT JOIN. We deliberately do NOT filter events
+    # by timestamp: a cutoff on event_timestamp would slice through the boundary
+    # hour and report a false drift (window total vs a partially-counted hour).
+    # We bound the scan by window_start (already hour-aligned) instead.
     with connection.cursor() as cur:
         cur.execute(
             """
-            SELECT e.customer_id,
-                   date_trunc('hour', e.event_timestamp) AS window_start,
-                   SUM(e.units_consumed) AS event_sum,
+            SELECT uw.customer_id,
+                   uw.window_start,
+                   COALESCE(SUM(e.units_consumed), 0) AS event_sum,
                    uw.units_consumed AS window_sum,
                    uw.sealed_at IS NOT NULL AS sealed
-              FROM event e
-              JOIN usage_window uw
-                ON uw.customer_id = e.customer_id
-               AND uw.window_start = date_trunc('hour', e.event_timestamp)
-             WHERE e.event_timestamp >= %s
-             GROUP BY e.customer_id, date_trunc('hour', e.event_timestamp),
+              FROM usage_window uw
+              LEFT JOIN event e
+                ON e.customer_id = uw.customer_id
+               AND date_trunc('hour', e.event_timestamp) = uw.window_start
+             WHERE uw.window_start >= %s
+             GROUP BY uw.customer_id, uw.window_start,
                       uw.units_consumed, uw.sealed_at
-            HAVING SUM(e.units_consumed) <> uw.units_consumed
+            HAVING COALESCE(SUM(e.units_consumed), 0) <> uw.units_consumed
             """,
             [since],
         )
