@@ -6,6 +6,24 @@ Designed for the stated target — 5,000 customers, 200 events/s sustained
 contractual — as a single-Postgres system with strong correctness and a clear
 path to scale. Money is integer micro-cents throughout (1 unit = $1e-8).
 
+**Pipeline at a glance.** Three scheduled jobs move data left-to-right. Each box
+is a table; the line beneath it is that table's mutability rule.
+
+```
+   POST /v1/events         aggregate_events          issue_invoices
+   (idempotent ingest)     (hourly cron)             (monthly cron)
+          |                       |                         |
+          v                       v                         v
+     +---------+   rolls   +--------------+   rolls   +-------------------+
+     |  event  | --------> | usage_window | --------> | invoice/line_item |
+     +---------+           +--------------+           +-------------------+
+     append-only           recomputable              immutable once issued;
+     source of truth       until sealed              edit only via audited
+                                                      line-item override
+
+   payment: POST /webhooks/payments (signed, replay-safe) marks issued -> paid
+```
+
 ## 1. Data model
 
 The spine is `event → usage_window → invoice/line_item`, with `customer`,
@@ -61,27 +79,30 @@ hammering the same request_id leaves exactly one row — the unique index
 serializes, no app lock. The dedup key is scoped to the tenant: request_ids are
 globally-unique by client convention (UUIDs), but scoping the constraint stops
 a hostile customer from suppressing another tenant's event by pre-claiming its
-request_id (§5).
+request_id (§5). (`tests/test_concurrency.py`, `tests/test_event_ingest.py`)
 
 **Aggregator runs twice.** A global `pg_try_advisory_lock` makes a second
 invocation return immediately. The work is an idempotent UPSERT recomputing the
 full window sum, guarded by `WHERE usage_window.sealed_at IS NULL`, so sealed
 windows are immutable and re-runs produce identical totals.
+(`tests/test_aggregator.py`: `test_rerun_produces_same_total`, `test_sealed_window_is_not_recomputed`)
 
 **Webhook delivered three times.** `webhook_delivery UNIQUE(delivery_id)`
 catches replays; inside the transaction we re-check `invoice.status` and no-op
 if already paid. Tested: three deliveries → one `issued→paid` transition, one
-audit row, two no-ops.
+audit row, two no-ops. (`tests/test_webhook.py::test_replay_same_delivery_id_three_times`)
 
 **Ops clicks "issue credit" twice.** A required `Idempotency-Key` header keys a
 staff-scoped `idempotency_key` row that stores the response; a replay returns it
 verbatim, and a reused key with a *different* body returns 409. The DB backstop
 is `credit UNIQUE(customer_id, idempotency_key)`: a 6-thread concurrent test
 produces exactly one credit and one audit row.
+(`tests/test_ops.py`: `test_concurrent_credit_same_key_one_credit`, `test_issue_credit_double_click_is_idempotent`)
 
 **Invoicer runs twice for a period.** Per-customer `pg_advisory_xact_lock` +
 an existence check inside the lock + `UNIQUE(customer_id, period_start)` as a
 hard backstop. An 8-thread concurrent test yields exactly one invoice.
+(`tests/test_invoicer.py::test_concurrent_issuance_yields_one_invoice`)
 
 Lock primitives: `pg_try_advisory_lock` (cron singletons), `pg_advisory_xact_lock`
 (per-customer serialization, auto-released on commit), `SELECT … FOR UPDATE`
@@ -119,7 +140,8 @@ hard-immutable (below).
 the next invoice as a `kind='adjustment'` line at the customer's current
 marginal rate. Drift is caught by three read-only daily reconciliation checks:
 event-sum vs window total (paging if the window is sealed), invoice total vs
-line-item sum, and stuck-draft detection. These three queries are also the
+line-item sum, and stuck-draft detection (`tests/test_reconciliation.py`).
+These three queries are also the
 "debug a wrong invoice" runbook — walk them top-down to localize where a number
 diverged, then correct with a credit (never a silent edit to a sealed invoice).
 
@@ -180,6 +202,7 @@ never from request input. Replays dedup on `(customer_id, request_id)` — scope
 per tenant so A can't suppress B's events by pre-claiming a request_id; negative
 units hit a CHECK; a forged webhook fails HMAC; brute-forcing a 190-bit key or the
 rate-limited login (5/min/IP) is infeasible.
+(`tests/test_tenant_scoping.py`, `tests/test_unsafe_allowlist.py`)
 
 **Hostile insider (valid staff).** Can't be prevented, so it's made undeniable:
 every credit and override writes an `audit_log` row — actor, IP, before/after,
@@ -190,6 +213,7 @@ connects as `app_role`; migrations run as a separate `migrator_role`. A
 SQL-injected app connection still cannot alter history. There is deliberately no
 ops endpoint to mark an invoice paid — only the signed webhook can — so an
 insider can't fake payment without leaving the audit trail of a credit/override.
+(`tests/test_audit_immutability.py`, `tests/test_role_split.py`)
 
 **Compromised webhook source (leaked HMAC secret).** Blast radius is one
 transition (`issued→paid`); the payload amount is verified against the invoice
