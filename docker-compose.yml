@@ -44,6 +44,15 @@ services:
         python manage.py migrate --database=migrator &&
         python manage.py runserver 0.0.0.0:8000
       "
+    healthcheck:
+      # Healthy only once migrations have run and the server is serving, so
+      # `docker compose up -d --wait` blocks until the API is actually ready
+      # (and seeding in a separate container can't race the migration).
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
 
   cron:
     build:
@@ -56,7 +65,7 @@ services:
       postgres:
         condition: service_healthy
       backend:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - ./backend:/app
     command: python cron_runner.py

@@ -17,3 +17,16 @@ class ApiKeyAuthScheme(OpenApiAuthenticationExtension):
             "scheme": "bearer",
             "description": "API key as `Authorization: Bearer vk_live_<prefix>_<secret>`",
         }
+
+
+class CustomerSessionAuthScheme(OpenApiAuthenticationExtension):
+    target_class = "apps.api.auth.CustomerSessionAuthentication"
+    name = "CustomerSessionAuth"
+
+    def get_security_definition(self, auto_schema):  # noqa: ARG002
+        return {
+            "type": "apiKey",
+            "in": "cookie",
+            "name": "customer_session",
+            "description": "Customer dashboard session cookie (set by /v1/auth/login).",
+        }

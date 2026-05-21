@@ -127,6 +127,15 @@ REST_FRAMEWORK = {
     "TEST_REQUEST_DEFAULT_FORMAT": "json",
 }
 
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Verita Metered Billing API",
+    "DESCRIPTION": "Customer-facing metered billing API (/v1). "
+                   "Internal /ops console endpoints are excluded from the public schema.",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "PREPROCESSING_HOOKS": ["verita.schema_hooks.exclude_internal_paths"],
+}
+
 
 # --- CORS --------------------------------------------------------------------
 

@@ -192,6 +192,16 @@ the 2,000/s hot path to defend against a race that only opens once a month at
 seal time. We took the lockless path and absorb the race in the invoicer,
 accepting eventual per-invoice / exact-aggregate correctness.
 
+**Front-ends via Vite over front-ends in compose.** `docker compose up` runs the
+core system (DB, API, cron); the two SPAs run via `npm run dev`, with Vite
+proxying `/v1` and `/ops` to the API so cookies and CSRF are same-origin. The
+alternative — serving built SPAs behind nginx inside compose — means proxying
+Django's CSRF-protected session through nginx with the right `Host`/`Origin`
+headers, which is fiddly and easy to get subtly wrong on a reviewer's first run.
+Given the brief frames the front-ends as "minimal, functional," the proven
+Vite-proxy path (verified end-to-end, including the ops credit flow) was the
+lower-risk choice; containerizing them is a known, additive follow-up.
+
 ## 7. What I didn't build, and would build next
 
 Deliberately out of scope: **plan versioning** (late-event adjustments use the

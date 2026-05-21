@@ -118,6 +118,7 @@ class LogoutView(APIView):
     authentication_classes = [CustomerSessionAuthentication]
     permission_classes = [HasCustomerScope]
 
+    @extend_schema(request=None, responses={204: None})
     def post(self, request):
         token = request.COOKIES.get(CUSTOMER_SESSION_COOKIE)
         if token:

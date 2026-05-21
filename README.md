@@ -22,8 +22,9 @@ cp .env.example .env
 
 # 2. Bring up Postgres + Django API + the cron sidecar.
 #    First boot creates the Postgres role split (migrator_role / app_role)
-#    and the backend auto-applies migrations.
-docker compose up -d
+#    and the backend auto-applies migrations. --wait blocks until the API is
+#    healthy (migrated + serving), so the seed below can't race the migration.
+docker compose up -d --wait
 
 # 3. Seed realistic data: customers, API keys, ~thousands of events
 #    (with late arrivals + duplicate request_ids), plus a demo ops user.
