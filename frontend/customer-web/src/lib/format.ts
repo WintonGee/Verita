@@ -22,6 +22,17 @@ export function formatMoney(microCents: number, currency = 'USD'): string {
   );
 }
 
+/**
+ * Format a per-unit price, which can be sub-cent (e.g. $0.001/unit). Shows up
+ * to 8 decimals with trailing zeros trimmed, so a $0.001 rate doesn't collapse
+ * to "$0.00" the way the 2-decimal currency formatter would.
+ */
+export function formatUnitPrice(microCents: number): string {
+  const dollars = microCents / 1e8;
+  if (dollars === 0) return '$0';
+  return '$' + dollars.toFixed(8).replace(/\.?0+$/, '');
+}
+
 const numberFormatter = new Intl.NumberFormat('en-US');
 
 export function formatUnits(units: number | null | undefined): string {

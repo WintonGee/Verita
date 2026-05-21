@@ -113,7 +113,14 @@ class Event(models.Model):
     class Meta:
         db_table = "event"
         constraints = [
-            models.UniqueConstraint(fields=["request_id"], name="event_request_id_unique"),
+            # Scoped per-customer (not global): client request_ids are
+            # globally-unique by convention (UUIDs), but scoping the dedup key
+            # to the tenant prevents a hostile customer from suppressing
+            # another tenant's events by pre-claiming a request_id.
+            models.UniqueConstraint(
+                fields=["customer", "request_id"],
+                name="event_customer_request_id_unique",
+            ),
             models.CheckConstraint(
                 check=models.Q(units_consumed__gte=0),
                 name="event_units_nonneg",

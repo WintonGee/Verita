@@ -85,6 +85,9 @@ export function CustomerDetailPage() {
               {/* Current period card */}
               <CurrentPeriodCard period={c.current_period} />
 
+              {/* Usage history */}
+              <UsageHistory days={c.usage_daily} />
+
               {/* Invoices */}
               <section>
                 <h2 className="mb-2 text-lg font-semibold text-gray-900">
@@ -129,6 +132,42 @@ export function CustomerDetailPage() {
         </QueryBoundary>
       </main>
     </div>
+  );
+}
+
+function UsageHistory({ days }: { days: CustomerDetail['usage_daily'] }) {
+  return (
+    <section className="rounded border border-gray-200 bg-white p-4">
+      <h2 className="mb-1 text-lg font-semibold text-gray-900">
+        Usage (last 30 days)
+      </h2>
+      <p className="mb-3 text-sm text-gray-500">Daily units consumed.</p>
+      {days.length === 0 ? (
+        <div className="py-6 text-center text-sm text-gray-400">
+          No usage in the last 30 days.
+        </div>
+      ) : (
+        (() => {
+          const max = Math.max(...days.map((d) => d.units), 1);
+          return (
+            <div className="flex h-40 items-end gap-1">
+              {days.map((d) => (
+                <div
+                  key={d.day}
+                  className="flex h-full flex-1 items-end"
+                  title={`${d.day}: ${d.units.toLocaleString()} units`}
+                >
+                  <div
+                    className="w-full rounded-t bg-blue-500"
+                    style={{ height: `${Math.max(2, (d.units / max) * 100)}%` }}
+                  />
+                </div>
+              ))}
+            </div>
+          );
+        })()
+      )}
+    </section>
   );
 }
 

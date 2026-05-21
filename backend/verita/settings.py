@@ -16,9 +16,12 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-key-replace-me")
+# Fail safe: DEBUG off and a restrictive host allowlist unless explicitly set.
 DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"
 ALLOWED_HOSTS = [
-    h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if h.strip()
+    h.strip()
+    for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,backend").split(",")
+    if h.strip()
 ]
 
 INSTALLED_APPS = [
@@ -146,6 +149,17 @@ CORS_ALLOWED_ORIGINS = [
     ).split(",") if o.strip()
 ]
 CORS_ALLOW_CREDENTIALS = True
+
+# Django checks Origin against this list for unsafe (POST/PATCH/...) methods.
+# The SPAs post from these origins (via the Vite proxy), so they must be trusted
+# or every ops mutation fails CSRF Origin checking. Browsers always send Origin
+# (curl does not — which is why this only surfaces in a real browser).
+CSRF_TRUSTED_ORIGINS = [
+    o.strip() for o in os.environ.get(
+        "CSRF_TRUSTED_ORIGINS",
+        "http://localhost:5173,http://localhost:5174,http://localhost:8000",
+    ).split(",") if o.strip()
+]
 
 
 # --- Webhook signing ---------------------------------------------------------

@@ -20,7 +20,8 @@ Every money column is `bigint` micro-cents; bigint's max ÷ 1e8 ≈ $92B per row
 ample for any invoice. Floats are used only for display formatting.
 
 **Indexes match the queries actually run.** Each earns its place:
-- `event UNIQUE(request_id)` — the ingest idempotency primitive.
+- `event UNIQUE(customer_id, request_id)` — the ingest idempotency primitive,
+  scoped per-tenant (see §2/§5: prevents cross-tenant request_id poisoning).
 - `event(customer_id, event_timestamp DESC)` — `GET /v1/usage` and per-customer
   aggregation.
 - `event(api_key_id, event_timestamp DESC)` — `/v1/usage?api_key_id=`.
@@ -53,10 +54,14 @@ and the queries don't change, only where the bytes sit.
 Idempotency lives in the schema, not in application bookkeeping. Five replay
 scenarios, each closed and tested:
 
-**Event ingestion replayed.** `INSERT … ON CONFLICT(request_id) DO NOTHING`
-in one multi-row statement. Re-delivery is a silent no-op; the response reports
-`accepted`/`duplicate` per request_id. A 20-thread test hammering the same
-request_id leaves exactly one row — the unique index serializes, no app lock.
+**Event ingestion replayed.** `INSERT … ON CONFLICT(customer_id, request_id)
+DO NOTHING` in one multi-row statement. Re-delivery is a silent no-op; the
+response reports `accepted`/`duplicate` per request_id. A 20-thread test
+hammering the same request_id leaves exactly one row — the unique index
+serializes, no app lock. The dedup key is scoped to the tenant: request_ids are
+globally-unique by client convention (UUIDs), but scoping the constraint stops
+a hostile customer from suppressing another tenant's event by pre-claiming its
+request_id (§5).
 
 **Aggregator runs twice.** A global `pg_try_advisory_lock` makes a second
 invocation return immediately. The work is an idempotent UPSERT recomputing the
@@ -146,8 +151,9 @@ cron + advisory locks is simpler and sufficient.
 `CustomerScopedManager` — a bare `.objects` query *raises*; only `.for_customer()`
 returns rows, and a guessed UUID for another tenant returns 404, not 403, so
 existence isn't confirmed. The `customer_id` is taken from the authenticated key,
-never from request input. Replays dedup on `request_id`; negative units hit a
-CHECK; a forged webhook fails HMAC; brute-forcing a 190-bit key or the
+never from request input. Replays dedup on `(customer_id, request_id)` — scoped
+per tenant so A can't suppress B's events by pre-claiming a request_id; negative
+units hit a CHECK; a forged webhook fails HMAC; brute-forcing a 190-bit key or the
 rate-limited login (5/min/IP) is infeasible.
 
 **Hostile insider (valid staff).** Can't be prevented, so it's made undeniable:

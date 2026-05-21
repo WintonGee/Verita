@@ -89,7 +89,7 @@ class EventIngestView(APIView):
             FROM UNNEST(
                 %s::text[], %s::text[], %s::integer[], %s::timestamptz[]
             ) AS r(request_id, endpoint, units, ts)
-            ON CONFLICT (request_id) DO NOTHING
+            ON CONFLICT (customer_id, request_id) DO NOTHING
             RETURNING request_id
         """
         params = [

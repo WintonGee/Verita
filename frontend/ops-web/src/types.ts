@@ -80,6 +80,11 @@ export interface ApiKey {
   revoked_at: string | null;
 }
 
+export interface UsageDay {
+  day: string; // YYYY-MM-DD
+  units: number;
+}
+
 export interface CustomerDetail {
   id: string;
   name: string;
@@ -87,6 +92,7 @@ export interface CustomerDetail {
   status: CustomerStatus;
   price_plan: PricePlan;
   current_period: CurrentPeriod;
+  usage_daily: UsageDay[];
   invoices: Invoice[];
   api_keys: ApiKey[];
 }
