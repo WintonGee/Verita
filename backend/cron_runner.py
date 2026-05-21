@@ -23,8 +23,8 @@ logging.basicConfig(format="[cron] %(asctime)s %(message)s")
 SCHEDULES: list = [
     ("aggregator", lambda dt: dt.minute == 15, ["aggregate_events"]),
     ("invoicer", lambda dt: dt.day == 1 and dt.hour == 0 and dt.minute == 30, ["issue_invoices"]),
-    # ("reconcile",  lambda dt: dt.hour == 3 and dt.minute == 0, ["run_reconciliation"]),
-    # ("cleanup",    lambda dt: dt.hour == 4 and dt.minute == 0, ["cleanup_idempotency_keys"]),
+    ("reconcile", lambda dt: dt.hour == 3 and dt.minute == 0, ["run_reconciliation"]),
+    ("cleanup", lambda dt: dt.hour == 4 and dt.minute == 0, ["cleanup_idempotency_keys"]),
 ]
 
 

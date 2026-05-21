@@ -18,6 +18,10 @@ ALLOWED_UNSAFE_FILES = {
     "tests/test_concurrency.py",  # concurrency tests count Event rows across tenants
     "tests/test_invoicer.py",     # invoicer tests seed events/credits without a request scope
     "tests/test_aggregator.py",   # aggregator tests seed events without a request scope
+    "tests/test_customer_read.py",  # read tests seed cross-tenant events to prove isolation
+    "tests/test_reconciliation.py",  # reconciliation tests seed events without a request scope
+    # Production allowlist additions for reconciliation:
+    "apps/billing/reconciliation.py",  # cross-tenant by design (drift report over all tenants)
     # Production allowlist — system contexts with legitimate cross-tenant scope:
     "apps/api/views_webhooks.py",  # payment webhook has no tenant; looks up invoice by id
     "apps/billing/management/commands/seed.py",  # admin script: resets all tenants

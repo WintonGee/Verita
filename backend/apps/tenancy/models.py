@@ -71,6 +71,28 @@ class CustomerUser(models.Model):
         return f"{self.email} → {self.customer.name}"
 
 
+class CustomerSession(models.Model):
+    """
+    Browser session for the customer dashboard. The cookie carries a random
+    token; we store only its SHA-256 hash (a DB leak can't be replayed as a
+    live session). Distinct from Django's auth.User sessions (ops staff), so
+    the two auth domains never share a cookie namespace.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer_user = models.ForeignKey(
+        CustomerUser, on_delete=models.CASCADE, related_name="sessions"
+    )
+    token_hash = models.BinaryField(unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "customer_session"
+        indexes = [
+            models.Index(fields=["expires_at"], name="session_expires_idx"),
+        ]
+
+
 def _new_api_key_prefix():
     # 8 random base62-ish chars (we use base16 here for simplicity in dev).
     # Collision space ≈ 16^8 = 4 billion; we retry on the unique-constraint

@@ -34,3 +34,21 @@ def api_key_a(db, customer_a):
 def api_key_b(db, customer_b):
     from tests.factories import ApiKeyFactory
     return ApiKeyFactory(customer=customer_b)
+
+
+@pytest.fixture
+def customer_user_a(db, customer_a):
+    from django.contrib.auth.hashers import make_password
+    from apps.tenancy.models import CustomerUser
+    return CustomerUser.objects.create(
+        customer=customer_a, email="alice@acme.com",
+        password_hash=make_password("s3cret-pass"), is_active=True,
+    )
+
+
+@pytest.fixture
+def staff_user(db):
+    from django.contrib.auth.models import User
+    return User.objects.create_user(
+        username="ops", email="ops@verita.com", password="ops-pass", is_staff=True,
+    )

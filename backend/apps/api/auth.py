@@ -19,10 +19,16 @@ import re
 from django.utils import timezone
 from rest_framework import authentication, exceptions
 
-from apps.tenancy.models import ApiKey, Customer
+from apps.tenancy.models import ApiKey, Customer, CustomerSession
 
 
 KEY_RE = re.compile(r"^vk_live_([0-9a-f]{8})_([0-9a-f]{32})$")
+
+CUSTOMER_SESSION_COOKIE = "customer_session"
+
+
+def hash_session_token(token: str) -> bytes:
+    return hashlib.sha256(token.encode()).digest()
 
 
 class ApiKeyAuthentication(authentication.BaseAuthentication):
@@ -77,3 +83,38 @@ class ApiKeyAuthentication(authentication.BaseAuthentication):
 
     def authenticate_header(self, request):  # noqa: ARG002
         return self.keyword
+
+
+class CustomerSessionAuthentication(authentication.BaseAuthentication):
+    """
+    Cookie-based auth for the customer dashboard SPA. Reads the
+    `customer_session` cookie, hashes it, looks up a live CustomerSession, and
+    sets request.customer + request.customer_user. Returns (None, session)
+    since there is no Django auth.User for customers.
+    """
+
+    def authenticate(self, request):
+        token = request.COOKIES.get(CUSTOMER_SESSION_COOKIE)
+        if not token:
+            return None  # no session cookie; let other auth classes try
+
+        try:
+            session = (CustomerSession.objects
+                       .select_related("customer_user__customer")
+                       .get(token_hash=hash_session_token(token)))
+        except CustomerSession.DoesNotExist:
+            raise exceptions.AuthenticationFailed("Invalid session.")
+
+        if session.expires_at <= timezone.now():
+            session.delete()
+            raise exceptions.AuthenticationFailed("Session expired.")
+
+        user = session.customer_user
+        if not user.is_active:
+            raise exceptions.AuthenticationFailed("User is inactive.")
+        if user.customer.status != Customer.Status.ACTIVE:
+            raise exceptions.AuthenticationFailed(f"Customer is {user.customer.status}.")
+
+        request.customer = user.customer
+        request.customer_user = user
+        return (None, session)
