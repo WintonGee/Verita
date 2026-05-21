@@ -61,7 +61,7 @@ The seed prints customer logins and **plaintext API keys** (shown once). Default
 ## Running the tests
 
 ```bash
-docker compose run --rm backend python -m pytest          # all 106
+docker compose run --rm backend python -m pytest          # all 107
 docker compose run --rm backend python -m pytest -m concurrency   # the thread-race tests
 ```
 
@@ -110,7 +110,7 @@ backend/            Django project
                     credit; aggregator / invoicer / pricing / reconciliation
   apps/audit/       audit_log (immutable), webhook_delivery, idempotency_key
   apps/api/         DRF auth, /v1 (customer), /ops (staff), /webhooks
-  tests/            106 tests, organized by correctness boundary
+  tests/            107 tests, organized by correctness boundary
 frontend/customer-web/   dashboard SPA (usage chart, invoices)
 frontend/ops-web/        ops console SPA (customers, credit + override modals)
 ops/postgres/init/       role-split bootstrap (runs on first DB boot)

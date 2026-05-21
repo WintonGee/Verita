@@ -209,7 +209,7 @@ Prefix each with `docker compose run --rm backend `.
 ## 6. Running the tests
 
 ```bash
-docker compose run --rm backend python -m pytest          # all (~106)
+docker compose run --rm backend python -m pytest          # all (~107)
 docker compose run --rm backend python -m pytest -m concurrency   # the thread-race tests
 docker compose run --rm backend python -m pytest tests/test_pricing.py -v
 ```
