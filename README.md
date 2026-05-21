@@ -2,8 +2,10 @@
 
 Ingest usage events → aggregate into hourly windows → roll into monthly invoices
 against a tiered price plan, with a payment webhook, a customer dashboard, and
-an internal ops console. Built for the take-home brief; the design write-up is
-in **[DESIGN.md](DESIGN.md)** (start there — it's half the deliverable).
+an internal ops console. Built for the take-home brief.
+
+- **[DESIGN.md](DESIGN.md)** — the design write-up (start here; it's half the deliverable).
+- **[GUIDE.md](GUIDE.md)** — how to *use* the running system (API, dashboards, ops cookbook).
 
 Stack: Django 5 + DRF + Postgres 16, cron-driven background jobs, two
 React + Vite + TypeScript SPAs. Money is integer micro-cents throughout
