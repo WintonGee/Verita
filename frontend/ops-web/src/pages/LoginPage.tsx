@@ -6,6 +6,11 @@ import { apiFetch, ApiError } from '../lib/apiClient';
 import type { MeResponse } from '../types';
 import { ME_QUERY_KEY } from '../lib/auth';
 
+// Demo staff login, created by `manage.py seed`. Shown on the page for easy
+// testing; demo-only convenience, not production code.
+const DEMO_USERNAME = 'ops';
+const DEMO_PASSWORD = 'ops-pass-123';
+
 export function LoginPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -103,9 +108,21 @@ export function LoginPage() {
           {submitting ? 'Signing in…' : 'Sign in'}
         </button>
 
-        <p className="text-center text-xs text-gray-400">
-          Demo: ops / ops-pass-123
-        </p>
+        <div className="rounded-md border border-dashed border-gray-300 bg-gray-50 p-3 text-xs text-gray-600">
+          <div className="mb-1 font-medium text-gray-700">Demo staff login</div>
+          <div className="font-mono">{DEMO_USERNAME}</div>
+          <div className="font-mono">{DEMO_PASSWORD}</div>
+          <button
+            type="button"
+            onClick={() => {
+              setUsername(DEMO_USERNAME);
+              setPassword(DEMO_PASSWORD);
+            }}
+            className="mt-2 rounded border border-gray-300 bg-white px-2 py-1 font-medium text-gray-700 hover:bg-gray-100"
+          >
+            Fill demo credentials
+          </button>
+        </div>
       </form>
     </div>
   );

@@ -5,9 +5,8 @@ polling loop that invokes Django management commands at their scheduled times.
 Each scheduled task is responsible for its own concurrency safety via
 `pg_try_advisory_lock`. The runner just fires-and-forgets.
 
-The actual schedules are filled in as we add the management commands in
-tasks #6, #14, #16. For task #1 (scaffolding), this is a stub that just
-keeps the container alive.
+Schedule (see SCHEDULES below): aggregate hourly at :15, issue invoices on the
+1st at 00:30, reconcile daily at 03:00, clean up idempotency keys at 04:00.
 """
 
 import logging

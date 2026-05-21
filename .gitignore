@@ -23,6 +23,9 @@ node_modules/
 dist/
 .vite/
 *.tsbuildinfo
+# Vite config TS-compiler output (keep only the .ts source)
+vite.config.js
+vite.config.d.ts
 
 # Env / secrets
 .env

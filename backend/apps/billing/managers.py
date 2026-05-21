@@ -40,11 +40,11 @@ class CustomerScopedManager(models.Manager):
 
     def unsafe_all_tenants(self):
         """
-        Explicit cross-tenant queryset. Use only in:
-          - cron tasks that intentionally iterate all tenants
-          - ops viewsets (staff already has cross-tenant authority)
-          - reconciliation reports
-        Grep for this method name to enumerate all call sites.
+        Explicit cross-tenant queryset. Current call sites (all system contexts
+        with no per-request tenant): the payment webhook (looks up an invoice by
+        id) and the reconciliation cron (drift report over all tenants). Ops
+        views resolve the customer first and then use .for_customer(). Grep for
+        this method name to enumerate all call sites; a meta-test pins the list.
         """
         return super().get_queryset()
 

@@ -67,7 +67,10 @@ export function UsageChart() {
                   <Tooltip
                     formatter={(v: number) => [formatUnits(v), 'Units']}
                   />
-                  <Bar dataKey="units" fill="#374151" />
+                  {/* Animation off: deterministic render (the enter animation
+                      can jam at ~0 height under React 18 StrictMode double-mount,
+                      leaving an empty chart). */}
+                  <Bar dataKey="units" fill="#374151" isAnimationActive={false} />
                 </BarChart>
               </ResponsiveContainer>
             </div>

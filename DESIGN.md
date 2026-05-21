@@ -145,6 +145,31 @@ per-customer dispatch via `SELECT … FOR UPDATE SKIP LOCKED` over a claim queue
 N workers → N×. This is the point where Celery earns its place; before it,
 cron + advisory locks is simpler and sufficient.
 
+**Where these numbers come from** (back-of-envelope, not yet load-tested): each
+ingest insert touches the `UNIQUE(customer_id, request_id)` B-tree plus two
+secondary indexes (~3 index writes/event); at 3k/s that's ~9k index-IOPS, which
+is roughly where a single commodity-RDS writer's IOPS + WAL saturate — hence the
+~3k/s ceiling. The ~600ms/customer invoicer cost is one read of a month of
+windows (≤744 rows/customer) + tiered compute + a handful of inserts in one
+transaction. Turning these estimates into measured numbers (drive the seed
+generator + time it) is a named follow-up.
+
+**Observability — what we'd alert on.** Prometheus counters on the hot paths,
+structured logs with a `trace_id`, and the daily reconciliation as the backstop.
+The page-vs-warn split:
+
+| Signal | Threshold | Sev | Why |
+|---|---|---|---|
+| `invoicer.failed_run` | any | **page** | a financial cron failed |
+| `drift.window` (sealed) | > 0.5% | **page** | a sealed-window invariant broke |
+| `aggregator.failed_runs` | ≥ 3 in a row | **page** | pipeline is broken |
+| `webhook.invalid_signature_rate` | > 5%/hr | **page** | attack or botched secret rotation |
+| `event.ingest_5xx` | > 0.1%/min | **page** | data plane breaking |
+| `aggregator.lag` | > 2 h | warn | dashboard data going stale |
+| `idempotency_key.collision_with_diff_body` | any | warn | a client bug worth surfacing |
+
+(Fuller table + the "debug a wrong invoice" runbook in `docs/design-notes/OPS-SCALING.md`.)
+
 ## 5. Threat model
 
 **Hostile customer (valid API key).** Cross-tenant reads are blocked at the
@@ -198,15 +223,26 @@ the 2,000/s hot path to defend against a race that only opens once a month at
 seal time. We took the lockless path and absorb the race in the invoicer,
 accepting eventual per-invoice / exact-aggregate correctness.
 
-**Front-ends via Vite over front-ends in compose.** `docker compose up` runs the
-core system (DB, API, cron); the two SPAs run via `npm run dev`, with Vite
-proxying `/v1` and `/ops` to the API so cookies and CSRF are same-origin. The
-alternative — serving built SPAs behind nginx inside compose — means proxying
-Django's CSRF-protected session through nginx with the right `Host`/`Origin`
-headers, which is fiddly and easy to get subtly wrong on a reviewer's first run.
-Given the brief frames the front-ends as "minimal, functional," the proven
-Vite-proxy path (verified end-to-end, including the ops credit flow) was the
-lower-risk choice; containerizing them is a known, additive follow-up.
+**Front-ends in compose as Vite dev servers, not nginx-static.** `docker compose
+up` brings up everything including both SPAs, each a Vite dev server whose proxy
+forwards its API paths to `backend:8000` (cookies + CSRF stay same-origin). The
+rejected alternative — building the SPAs and serving them behind nginx — means
+proxying Django's CSRF-protected session through nginx with the right
+`Host`/`Origin` headers, which is fiddly and easy to get subtly wrong. Running
+Vite in the container keeps the proven same-origin proxy with one knob
+(`VITE_PROXY_TARGET`) and no nginx. Honest cost: it's a dev server, not a
+production build — fine for a demo; a real deploy would ship static assets via a
+CDN with `CSRF_TRUSTED_ORIGINS` set to the real origins.
+
+**What I'd do differently.** Three honest reflections. (1) `Idempotency-Key` is
+*required* on credit issuance but only *honored-if-present* on line-item override
+— overrides are value-idempotent so it's defensible, but a uniform money-moving
+contract would require it on both. (2) The §4 scaling ceilings are reasoned, not
+measured; with more time I'd add a seed-driven load-test harness and replace the
+back-of-envelope numbers with real ones. (3) The lockless-ingest boundary is the
+right call at this scale, but if an SLA ever demanded exact *per-invoice* (not
+just per-aggregate) correctness, I'd revisit it with a shared advisory lock on
+the ingest path and measure the hot-path cost rather than assume it.
 
 ## 7. What I didn't build, and would build next
 

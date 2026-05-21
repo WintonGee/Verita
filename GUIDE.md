@@ -19,15 +19,15 @@ Everything money is **integer micro-cents** (1 unit = $1e-8; $1.00 = 100,000,000
 
 ```bash
 cp .env.example .env
-docker compose up -d --wait                 # DB + API + cron, blocks until ready
+docker compose up -d --wait                 # DB + API + cron + both SPAs, blocks until ready
 docker compose run --rm backend python manage.py seed --customers=5 --days=45
 docker compose run --rm backend python manage.py aggregate_events --catch-up
 docker compose run --rm backend python manage.py issue_invoices
-
-# front-ends (one terminal each)
-cd frontend/customer-web && npm install && npm run dev   # :5173
-cd frontend/ops-web      && npm install && npm run dev   # :5174
 ```
+
+`docker compose up` serves both SPAs (customer-web :5173, ops-web :5174). For
+frontend hot-reload development you can instead run one directly:
+`cd frontend/customer-web && npm install && npm run dev`.
 
 `seed` prints the credentials you'll use:
 

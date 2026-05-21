@@ -13,12 +13,12 @@ from datetime import timedelta
 
 from django.contrib.auth import authenticate, login, logout
 from django.db import IntegrityError, transaction
-from django_ratelimit.core import is_ratelimited
 from django.db.models import Sum
 from django.db.models.functions import TruncDay
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
+from django_ratelimit.core import is_ratelimited
 from rest_framework import generics, status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import IsAdminUser

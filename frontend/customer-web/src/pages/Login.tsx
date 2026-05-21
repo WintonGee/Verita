@@ -5,6 +5,11 @@ import { apiFetch, ApiError } from '../lib/apiClient';
 import { ME_QUERY_KEY } from '../hooks/useMe';
 import type { MeResponse } from '../lib/types';
 
+// Demo login, created by `manage.py seed`. Shown on the page so the system can
+// be tried out immediately. This is demo-only convenience, not production code.
+const DEMO_EMAIL = 'user1@example.com';
+const DEMO_PASSWORD = 'password123';
+
 export function Login() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -107,6 +112,22 @@ export function Login() {
         >
           {submitting ? 'Signing in…' : 'Sign in'}
         </button>
+
+        <div className="rounded-md border border-dashed border-gray-300 bg-gray-50 p-3 text-xs text-gray-600">
+          <div className="mb-1 font-medium text-gray-700">Demo login</div>
+          <div className="font-mono">{DEMO_EMAIL}</div>
+          <div className="font-mono">{DEMO_PASSWORD}</div>
+          <button
+            type="button"
+            onClick={() => {
+              setEmail(DEMO_EMAIL);
+              setPassword(DEMO_PASSWORD);
+            }}
+            className="mt-2 rounded border border-gray-300 bg-white px-2 py-1 font-medium text-gray-700 hover:bg-gray-100"
+          >
+            Fill demo credentials
+          </button>
+        </div>
       </form>
     </div>
   );
