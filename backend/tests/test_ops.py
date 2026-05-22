@@ -236,6 +236,49 @@ def test_override_idempotent_with_key(ops_client, issued_invoice):
     assert AuditLog.objects.filter(action="line_item.override").count() == 1
 
 
+@pytest.mark.concurrency
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_line_item_overrides_keep_total_consistent(customer_a, staff_user):
+    """Two concurrent overrides of the same line item must serialize via
+    select_for_update: the invoice total stays equal to the sum of its line
+    items (no lost update), and both money-moving overrides are audited."""
+    inv = Invoice.objects.create(
+        customer=customer_a, period_start=datetime(2026, 4, 1, tzinfo=dt_tz.utc),
+        period_end=datetime(2026, 5, 1, tzinfo=dt_tz.utc), status=Invoice.Status.ISSUED,
+        currency="USD", total_micro_cents=90 * MICRO_CENTS_PER_USD, issued_at=timezone.now())
+    line = LineItem.objects.create(
+        invoice=inv, kind="usage", description="x", units=1,
+        unit_price_micro_cents=0, amount_micro_cents=90 * MICRO_CENTS_PER_USD)
+
+    url = f"/ops/invoices/{inv.id}/line-items/{line.id}"
+    amounts = [50 * MICRO_CENTS_PER_USD, 30 * MICRO_CENTS_PER_USD]
+    barrier = threading.Barrier(2)
+
+    def worker(amount):
+        try:
+            barrier.wait()
+            c = APIClient()
+            c.force_authenticate(user=staff_user)
+            c.patch(url, {"amount_micro_cents": amount,
+                          "reason": f"concurrent override {amount}"}, format="json")
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=worker, args=(a,)) for a in amounts]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    inv.refresh_from_db()
+    line.refresh_from_db()
+    # No lost update: stored total equals the (single) line item amount.
+    assert inv.total_micro_cents == line.amount_micro_cents
+    assert line.amount_micro_cents in amounts
+    # Both money-moving overrides left an audit row.
+    assert AuditLog.objects.filter(action="line_item.override").count() == 2
+
+
 @pytest.mark.django_db
 def test_override_blocked_on_paid_invoice(ops_client, issued_invoice):
     issued_invoice.status = Invoice.Status.PAID

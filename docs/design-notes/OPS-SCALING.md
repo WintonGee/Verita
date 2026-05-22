@@ -137,8 +137,8 @@ The rubric line: "how ops debugs a wrong invoice." Walking through:
 
 1. **Customer flags invoice `inv_abc`** (via support or self-service "dispute").
 2. **Ops opens `/ops/customers/{id}` → `inv_abc`**, sees the line-item breakdown.
-3. **Question 1: do line items × tier rates equal the invoice total?** If no, `invoice_total_drift` job has missed; recompute is a one-click "Recompute total" button (audited).
-4. **Question 2: do line-item units match `SUM(usage_window.units_consumed)` for the period?** Drill-down endpoint `/ops/invoices/{id}/drill` returns this comparison. If mismatch → drift between windows and line items at issuance time. Engineer involved.
+3. **Question 1: do line items sum to the invoice total?** The `invoice_total_drift` check (`run_reconciliation`) answers this. If they diverge on an *issued* invoice, correct it with an audited line-item override (`PATCH /ops/invoices/{id}/line-items/{id}`) or a credit — never a silent recompute of a sealed total.
+4. **Question 2: do line-item units match `SUM(usage_window.units_consumed)` for the period?** Run `run_reconciliation` (the `window_drift` check compares window totals to the raw events). A mismatch → drift between windows and line items at issuance time. Engineer involved.
 5. **Question 3: does `SUM(usage_window)` for the period match `SUM(event)`?** Reconciliation job catches this nightly; ops can also trigger on demand. If mismatch and windows are sealed → aggregator missed events.
 6. **Question 4: are there `is_late` events for this period that didn't get adjusted?** Query `event WHERE customer_id=? AND event_timestamp BETWEEN period_start AND period_end AND is_late=true`. If any are unadjusted, they'll roll into next month; explain that to the customer.
 7. **Resolution**:

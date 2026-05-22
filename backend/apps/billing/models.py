@@ -231,7 +231,10 @@ class Invoice(models.Model):
         ]
         indexes = [
             models.Index(fields=["status", "period_end"], name="invoice_status_period_idx"),
-            models.Index(fields=["customer", "-period_start"], name="invoice_customer_period_idx"),
+            # The customer invoice list (WHERE customer_id ORDER BY period_start
+            # DESC) is served by the UNIQUE(customer, period_start) index — Postgres
+            # scans it backward for free — so no separate (customer, period_start)
+            # index is needed.
         ]
 
 
