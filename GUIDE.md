@@ -111,6 +111,8 @@ Sign in as `ops` / `ops-pass-123`.
 - **Customer detail** — current-period card (today's units vs the 30-day daily
   average) with a ⚠ **anomaly badge** when today exceeds 10× the baseline; a
   30-day usage chart; the invoice list with line items; and API keys.
+  *(The seed gives **Acme Corp 1** a usage spike today, so its detail page shows
+  the anomaly badge — open it to see the signal fire.)*
 - **Issue credit** — opens a modal (see §4).
 - **Override** — next to each invoice line item (see §4).
 
