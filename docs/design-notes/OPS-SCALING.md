@@ -18,7 +18,7 @@
 | `event` rows | — (source of truth) | append-only; no UPDATE/DELETE in app code (only `is_late`/`adjusted_at` flag transitions) |
 | `usage_window.units_consumed` | `event` rows for that hour | `sealed_at IS NULL` (recomputable until invoice issuance) |
 | `invoice.line_items` (usage kind) | `usage_window` × `price_plan` for the period | invoice status `issued` (rewrites require override flow with audit) |
-| `invoice.total_micro_cents` | sum of own line items | always recomputable; reconciliation job auto-fixes drift |
+| `invoice.total_micro_cents` | sum of own line items | recomputable while draft; once issued, the reconciliation job *detects* (does not auto-fix) drift — ops resolves via an audited credit/override |
 | `audit_log` rows | — (source of truth for ops actions) | trigger-blocked UPDATE/DELETE; revoked grants |
 | `webhook_delivery` rows | — (source of truth for inbound webhooks) | unique on `delivery_id` |
 

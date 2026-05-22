@@ -105,18 +105,24 @@ hard backstop. An 8-thread concurrent test yields exactly one invoice.
 (`tests/test_invoicer.py::test_concurrent_issuance_yields_one_invoice`)
 
 Lock primitives: `pg_try_advisory_lock` (cron singletons), `pg_advisory_xact_lock`
-(per-customer serialization, auto-released on commit), `SELECT … FOR UPDATE`
+(per-customer serialization, auto-released on commit; **shared** on the ingest
+path, **exclusive** on the invoicer's seal step — below), `SELECT … FOR UPDATE`
 (line-item edits, window reads), and unique constraints (every dedup key).
 
-**The one honest correctness boundary.** Ingestion is intentionally lockless —
-the hot path can't afford a per-customer lock at 2,000/s. So an event can land
-during the invoicer's seal step with `is_late=false` even though its window is
-about to seal. The invoicer closes this in-transaction (step 10): just before
-commit it flips `is_late=true` for any event in the period with
-`ingested_at > txn_started_at`. Those become next month's adjustment line.
-Per-invoice correctness is therefore *eventual*; aggregate correctness across
-consecutive invoices is *exact*. This is the deliberate trade and it's
-documented where it lives.
+**The seal race — closed by construction.** Ingestion can't afford an *exclusive*
+per-customer lock at 2,000/s. But it can afford a **shared** advisory lock:
+shared holders don't conflict with each other, so 2,000/s ingest stays fully
+concurrent. The monthly invoicer takes that same lock **exclusive** around its
+re-aggregate→seal steps. So an event either commits *before* the exclusive lock
+(step 3 re-aggregates it onto this invoice) or *after* we release (its ingest
+sees the now-issued invoice and self-flags `is_late`, adjusted next period — the
+ingest check is "has this period been invoiced?", so an empty hour-window can't
+hide it). No event is lost or double-billed. Per-invoice correctness is *exact*
+for everything that arrived before issuance; genuinely-late arrivals are *exact*
+across consecutive invoices via the adjustment line. The cost is one cheap
+shared-lock acquisition per ingest — far less than the per-event exclusive lock a
+naive design would reach for, and it removes the wall-clock sweep entirely
+(`tests/test_concurrency.py`, `tests/test_invoicer.py`).
 
 ## 3. Aggregation pipeline
 
@@ -241,11 +247,16 @@ human passwords, so bcrypt's deliberate slowness defends against nothing here
 while taxing every request's auth lookup. We keep argon2id for customer
 *passwords*, which are guessable. (A DB dump exposes only hashes either way.)
 
-**Lockless ingest + invoicer sweep over locked ingest.** Forcing a per-customer
-lock on every event would make ingest correct-by-construction but cost ~0.5ms on
-the 2,000/s hot path to defend against a race that only opens once a month at
-seal time. We took the lockless path and absorb the race in the invoicer,
-accepting eventual per-invoice / exact-aggregate correctness.
+**Shared-lock ingest + exclusive-lock seal over the two obvious alternatives.**
+The seal race (an event committing while the invoicer seals) has two naive fixes,
+both bad: a per-event *exclusive* lock serializes ingest and taxes the 2,000/s
+hot path; a lockless ingest plus a wall-clock "flip late after my start time"
+sweep is subtly wrong — it compares the app-server clock to the DB's
+`ingested_at` and can both miss events and double-flip them. We instead take the
+advisory lock **shared** on ingest (shared holders don't conflict, so ingest
+stays fully concurrent) and **exclusive** on the invoicer's seal — closing the
+race by construction for the cost of one cheap shared-lock acquisition per
+request. See §2.
 
 **Front-ends in compose as Vite dev servers, not nginx-static.** `docker compose
 up` brings up everything including both SPAs, each a Vite dev server whose proxy
@@ -263,10 +274,11 @@ CDN with `CSRF_TRUSTED_ORIGINS` set to the real origins.
 — overrides are value-idempotent so it's defensible, but a uniform money-moving
 contract would require it on both. (2) The §4 scaling ceilings are reasoned, not
 measured; with more time I'd add a seed-driven load-test harness and replace the
-back-of-envelope numbers with real ones. (3) The lockless-ingest boundary is the
-right call at this scale, but if an SLA ever demanded exact *per-invoice* (not
-just per-aggregate) correctness, I'd revisit it with a shared advisory lock on
-the ingest path and measure the hot-path cost rather than assume it.
+back-of-envelope numbers with real ones. (3) The exclusive seal lock briefly
+blocks a customer's *own* ingest during their monthly invoice (sub-second); fine
+at this scale, but at very high per-customer ingest rates I'd shrink that window
+by computing totals first and holding the exclusive lock only across the seal
+write itself.
 
 ## 7. What I didn't build, and would build next
 

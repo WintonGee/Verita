@@ -38,14 +38,47 @@ def _code_for(exc):
     return "internal_error"
 
 
+def _clean(value):
+    """Recursively turn DRF ErrorDetail / nested structures into plain str."""
+    if isinstance(value, dict):
+        return {k: _clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
+    return str(value)
+
+
+def _first_message(value):
+    """Pull a single human-readable line out of a (cleaned) error structure,
+    prefixing the field name for per-field errors so the message is useful."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            m = _first_message(v)
+            if m:
+                return m if k == "non_field_errors" else f"{k}: {m}"
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            m = _first_message(v)
+            if m:
+                return m
+    elif isinstance(value, str):
+        return value
+    return None
+
+
 def error_response_handler(exc, context):
     drf_response = drf_default_handler(exc, context)
     if drf_response is None:
         return None
     detail = drf_response.data
     if isinstance(detail, dict) and "detail" in detail:
-        message = str(detail.pop("detail"))
-        details = detail or None
+        message = str(detail["detail"])
+        details = _clean({k: v for k, v in detail.items() if k != "detail"}) or None
+    elif isinstance(exc, ValidationError):
+        # Field-level validation: surface a clean human message AND structured
+        # per-field details, never the raw `{... ErrorDetail(...) ...}` repr.
+        cleaned = _clean(detail)
+        message = _first_message(cleaned) or "Validation failed."
+        details = cleaned if isinstance(cleaned, dict) else None
     else:
         message = str(detail)
         details = None

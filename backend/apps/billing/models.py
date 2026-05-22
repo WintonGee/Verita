@@ -88,9 +88,9 @@ class PriceTier(models.Model):
 class Event(models.Model):
     """
     Append-only usage event. `request_id` is the idempotency key for ingest.
-    `is_late` is set TRUE at insert time if the event's hour-window is already
-    sealed (via a subquery in the ingest path); also set TRUE by the invoicer's
-    Step 10 race-closure sweep for events that landed during invoicer txn.
+    `is_late` is set TRUE at insert time iff the event's period has already been
+    invoiced (a subquery in the ingest path, made authoritative by the
+    shared/exclusive seal advisory lock — see views_v1.py / invoicer.py).
     """
     # bigserial; never exposed to clients
     id = models.BigAutoField(primary_key=True)

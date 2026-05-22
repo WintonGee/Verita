@@ -32,6 +32,24 @@ def test_manager_raises_when_called_without_scope():
 
 
 @pytest.mark.django_db
+def test_writes_require_explicit_customer_scope(customer_a, api_key_a):
+    """Writes enforce a customer scope too (not just reads): a create/bulk_create
+    without a customer raises rather than landing an unscoped row."""
+    with pytest.raises(CustomerScopeMissing):
+        Event.objects.create(api_key=api_key_a, request_id="x", endpoint="/y",
+                             units_consumed=1, event_timestamp=timezone.now())
+    with pytest.raises(CustomerScopeMissing):
+        Event.objects.bulk_create([
+            Event(api_key=api_key_a, request_id="x", endpoint="/y",
+                  units_consumed=1, event_timestamp=timezone.now())
+        ])
+    # With an explicit customer it succeeds.
+    Event.objects.create(customer=customer_a, api_key=api_key_a, request_id="ok",
+                         endpoint="/y", units_consumed=1, event_timestamp=timezone.now())
+    assert Event.objects.for_customer(customer_a).filter(request_id="ok").count() == 1
+
+
+@pytest.mark.django_db
 def test_for_customer_returns_only_that_customers_rows(customer_a, customer_b, api_key_a, api_key_b):
     _make_event(customer_a, api_key_a, "req-a-1")
     _make_event(customer_a, api_key_a, "req-a-2")

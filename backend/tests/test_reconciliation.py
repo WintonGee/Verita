@@ -85,6 +85,24 @@ def test_invoice_total_drift_detected(customer_a):
 
 
 @pytest.mark.django_db
+def test_run_reconciliation_command_exits_nonzero_on_drift(customer_a):
+    """The cron command must exit non-zero on drift (CommandError) so a wrapper
+    checking $? actually alerts — printing to stderr alone left exit status 0."""
+    from django.core.management import call_command
+    from django.core.management.base import CommandError
+
+    inv = Invoice.objects.create(
+        customer=customer_a, period_start=datetime(2026, 4, 1, tzinfo=dt_tz.utc),
+        period_end=datetime(2026, 5, 1, tzinfo=dt_tz.utc), status=Invoice.Status.ISSUED,
+        total_micro_cents=100 * MICRO_CENTS_PER_USD, currency="USD", issued_at=timezone.now())
+    LineItem.objects.create(invoice=inv, kind="usage", description="x", units=1,
+                            unit_price_micro_cents=0, amount_micro_cents=90 * MICRO_CENTS_PER_USD)
+
+    with pytest.raises(CommandError):
+        call_command("run_reconciliation")
+
+
+@pytest.mark.django_db
 def test_stuck_draft_detected(customer_a):
     Invoice.objects.create(
         customer=customer_a, period_start=datetime(2026, 1, 1, tzinfo=dt_tz.utc),
