@@ -273,9 +273,20 @@ class IssueCreditView(APIView):
                     expires_at=timezone.now() + IDEMPOTENCY_TTL,
                 )
         except IntegrityError:
-            # Concurrent double-click: Credit UNIQUE(customer, key) caught it.
+            # Two possible sources, distinguished by what we find:
+            #  (a) same-customer concurrent double-click → Credit UNIQUE(customer,
+            #      key) fired; the winning credit exists for THIS customer → 200.
+            #  (b) the staff key was already used (e.g. concurrently for another
+            #      customer) → IdempotencyKey UNIQUE(staff, key) fired and our
+            #      credit rolled back; no credit for this customer exists → 409,
+            #      matching the sequential replay-conflict path above.
             existing = (Credit.objects.for_customer(customer)
                         .filter(idempotency_key=idem_key).first())
+            if existing is None:
+                return Response(
+                    {"error": {"code": "idempotency_conflict",
+                               "message": "Idempotency-Key reused with a different payload."}},
+                    status=status.HTTP_409_CONFLICT)
             return Response({
                 "id": str(existing.id),
                 "amount_micro_cents": existing.amount_micro_cents,

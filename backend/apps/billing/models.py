@@ -222,6 +222,12 @@ class Invoice(models.Model):
                 check=models.Q(total_micro_cents__gte=0),
                 name="invoice_total_nonneg",
             ),
+            # Temporal integrity in the schema (mirrors price_tier_end_gt_start):
+            # a billing period must be non-empty. Constraints over comments.
+            models.CheckConstraint(
+                check=models.Q(period_end__gt=models.F("period_start")),
+                name="invoice_period_end_gt_start",
+            ),
         ]
         indexes = [
             models.Index(fields=["status", "period_end"], name="invoice_status_period_idx"),
@@ -251,9 +257,8 @@ class LineItem(models.Model):
 
     class Meta:
         db_table = "line_item"
-        indexes = [
-            models.Index(fields=["invoice"], name="lineitem_invoice_idx"),
-        ]
+        # No explicit index on `invoice`: Django's FK auto-index on invoice_id
+        # already serves the only access pattern (line items for an invoice).
 
 
 # --- Credits -----------------------------------------------------------------

@@ -163,6 +163,48 @@ def test_concurrent_credit_same_key_one_credit(customer_a, staff_user):
     assert AuditLog.objects.filter(action="credit.issue").count() == 1
 
 
+@pytest.mark.concurrency
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_same_key_across_customers_resolves_to_409_not_500(
+        customer_a, customer_b, staff_user):
+    """Regression: a staff Idempotency-Key reused across two customers
+    concurrently must resolve to one 201 + one 409 — never a dirty 500. The
+    losing thread hits IdempotencyKey UNIQUE(staff, key) (not Credit's unique),
+    and the recovery lookup (scoped to its own customer) finds nothing; that
+    path used to raise AttributeError → 500."""
+    from apps.audit.models import IdempotencyKey
+
+    barrier = threading.Barrier(2)
+    statuses = []
+    lock = threading.Lock()
+
+    def worker(customer):
+        try:
+            barrier.wait()
+            c = APIClient()
+            c.force_authenticate(user=staff_user)
+            resp = c.post(
+                f"/ops/customers/{customer.id}/credits",
+                {"amount_micro_cents": 5 * MICRO_CENTS_PER_USD, "reason": "cross-cust race"},
+                format="json", HTTP_IDEMPOTENCY_KEY="shared-key")
+            with lock:
+                statuses.append(resp.status_code)
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=worker, args=(c,))
+               for c in (customer_a, customer_b)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert 500 not in statuses, statuses
+    assert sorted(statuses) == [201, 409], statuses
+    assert IdempotencyKey.objects.filter(
+        staff_id=staff_user.get_username(), key="shared-key").count() == 1
+
+
 # --- Line-item override ------------------------------------------------------
 
 @pytest.mark.django_db

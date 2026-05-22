@@ -43,9 +43,11 @@ GROUP BY customer_id, window_start, uw.units_consumed
 HAVING SUM(units_consumed) <> uw.units_consumed;
 ```
 
-If `delta > 0` and `sealed_at IS NULL`: auto re-aggregate (idempotent).
-If `delta > 0` and `sealed_at IS NOT NULL`: alert; engineer-triggered credit reconciliation.
-Threshold for alert vs page: any sealed-window drift pages immediately.
+If `delta <> 0` and `sealed_at IS NULL`: the window is still open, so the next
+hourly aggregator run recomputes it; reconciliation only flags cases that persist.
+If `delta <> 0` and `sealed_at IS NOT NULL`: alert; engineer-triggered credit
+reconciliation. The reconciliation job itself is read-only — it detects, it does
+not mutate. Threshold for alert vs page: any sealed-window drift pages immediately.
 
 ```sql
 -- Job 2: line-item total vs invoice
@@ -55,7 +57,9 @@ FROM invoice i
 WHERE i.status IN ('issued', 'paid')
 HAVING i.total_micro_cents <> line_sum;
 ```
-Auto-correct: recompute and update the denormalized total, audit row.
+Detected only (the job is read-only): a still-draft invoice is recomputed by
+re-running issuance; an *issued* invoice is corrected via an audited
+override/credit — never a silent UPDATE to a sealed total.
 
 ```sql
 -- Job 3: stuck-state detector

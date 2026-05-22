@@ -206,7 +206,7 @@ returns rows, and a guessed UUID for another tenant returns 404, not 403, so
 existence isn't confirmed. The `customer_id` is taken from the authenticated key,
 never from request input. Replays dedup on `(customer_id, request_id)` — scoped
 per tenant so A can't suppress B's events by pre-claiming a request_id; negative
-units hit a CHECK; a forged webhook fails HMAC; brute-forcing a 190-bit key or the
+units hit a CHECK; a forged webhook fails HMAC; brute-forcing a 128-bit key or the
 rate-limited login (5/min/IP) is infeasible.
 (`tests/test_tenant_scoping.py`, `tests/test_unsafe_allowlist.py`)
 
@@ -242,7 +242,7 @@ stuck-draft reconciliation check. Celery would add a broker and a worker tier to
 debug for visibility we don't yet need; it becomes worth it at the 50k-customer
 parallel-invoicer point, and the migration is additive.
 
-**SHA-256 over bcrypt for API keys.** API keys are 190-bit random secrets, not
+**SHA-256 over bcrypt for API keys.** API keys are 128-bit random secrets, not
 human passwords, so bcrypt's deliberate slowness defends against nothing here
 while taxing every request's auth lookup. We keep argon2id for customer
 *passwords*, which are guessable. (A DB dump exposes only hashes either way.)
