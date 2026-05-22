@@ -3,9 +3,8 @@ Proves audit_log immutability at the trigger layer.
 
 The grant-revocation layer (REVOKE UPDATE, DELETE ON audit_log FROM app_role)
 is the second line of defense — exercised separately via raw psycopg in
-test_role_split.py because the test DB is created using migrator_role and
-doesn't pick up per-DB default privileges. The trigger fires regardless of
-role, so it's testable directly from the ORM here.
+tests/test_role_split.py. The trigger fires regardless of role, so it's
+testable directly from the ORM here.
 """
 
 import pytest

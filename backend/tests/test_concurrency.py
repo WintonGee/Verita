@@ -11,7 +11,7 @@ at the index level; exactly one row exists in the end.
 import threading
 
 import pytest
-from django.db import connections
+from django.db import connection, connections, transaction
 from django.test import Client
 from django.utils import timezone
 
@@ -70,3 +70,50 @@ def test_concurrent_same_request_id_yields_one_row(api_key_a):
     # But exactly one Event row exists for that request_id
     rows = Event.objects.unsafe_all_tenants().filter(request_id="race-1")
     assert rows.count() == 1
+
+
+@pytest.mark.concurrency
+@pytest.mark.django_db(transaction=True)
+def test_seal_exclusive_lock_excludes_ingest_shared_lock(customer_a):
+    """
+    The seal-race guarantee rests on lock modes: ingest takes the per-customer
+    seal lock SHARED, the invoicer takes it EXCLUSIVE. Prove the two can't
+    interleave — while a transaction holds it exclusive (the invoicer mid-seal),
+    a shared acquisition (an ingest) cannot succeed; once released, it can.
+    """
+    key = f"verita:seal:{customer_a.id}"
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        try:
+            with transaction.atomic():
+                with connection.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [key])
+                held.set()
+                release.wait(timeout=5)
+            # leaving atomic() commits, releasing the xact lock
+        finally:
+            connection.close()
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert held.wait(timeout=5), "holder never acquired the exclusive lock"
+
+    # Exclusive is held by the other txn → a shared try-lock here must fail.
+    with transaction.atomic():
+        with connection.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_xact_lock_shared(hashtext(%s))", [key])
+            got_while_held = cur.fetchone()[0]
+
+    release.set()
+    t.join(timeout=5)
+
+    # Released → the shared lock (ingest) is now obtainable.
+    with transaction.atomic():
+        with connection.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_xact_lock_shared(hashtext(%s))", [key])
+            got_after_release = cur.fetchone()[0]
+
+    assert got_while_held is False   # invoicer's exclusive seal lock excludes ingest
+    assert got_after_release is True  # after the seal commits, ingest proceeds

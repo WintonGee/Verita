@@ -18,6 +18,7 @@ from django.db.models.functions import TruncDay
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
+from django_ratelimit.core import is_ratelimited
 from rest_framework import generics, status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import IsAdminUser
@@ -48,6 +49,13 @@ class OpsLoginView(APIView):
     permission_classes = []
 
     def post(self, request):
+        # Rate-limit staff login (5/min/IP) — these accounts guard cross-tenant
+        # credits and overrides, so they're the higher-value brute-force target.
+        if is_ratelimited(request._request, group="ops-login", key="ip",
+                          rate="5/m", method="POST", increment=True):
+            return Response(
+                {"error": {"code": "rate_limited", "message": "Too many attempts."}},
+                status=status.HTTP_429_TOO_MANY_REQUESTS)
         username = request.data.get("username")
         password = request.data.get("password")
         user = authenticate(request._request, username=username, password=password)
@@ -131,6 +139,20 @@ def _anomaly_signal(customer):
     }
 
 
+def _daily_usage_series(customer, days=30):
+    """Per-day units for the last `days` days (inclusive of today) for the ops
+    usage view. Same usage_window source as the customer dashboard chart."""
+    since = (timezone.now() - timedelta(days=days)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    rows = (UsageWindow.objects.for_customer(customer)
+            .filter(window_start__gte=since)
+            .annotate(day=TruncDay("window_start"))
+            .values("day")
+            .annotate(units=Sum("units_consumed"))
+            .order_by("day"))
+    return [{"day": r["day"].date().isoformat(), "units": int(r["units"])} for r in rows]
+
+
 class OpsCustomerDetailView(APIView):
     authentication_classes = [SessionAuthentication]
     permission_classes = [IsAdminUser]
@@ -156,6 +178,7 @@ class OpsCustomerDetailView(APIView):
             "price_plan": {"id": str(customer.price_plan_id),
                            "name": customer.price_plan.name},
             "current_period": _anomaly_signal(customer),
+            "usage_daily": _daily_usage_series(customer),
             "invoices": OpsInvoiceSerializer(invoices, many=True).data,
             "api_keys": OpsApiKeySerializer(api_keys, many=True).data,
         })
@@ -196,8 +219,15 @@ class IssueCreditView(APIView):
         amount = serializer.validated_data["amount_micro_cents"]
         reason = serializer.validated_data["reason"]
         staff_id = request.user.get_username()
+        # Fold the customer into the hash. Idempotency keys are staff-scoped, so
+        # without this a staff member reusing one key across two customers would
+        # match the first row and silently return customer A's response while
+        # customer B gets no credit. Including customer_id makes that a 409.
         body_hash = hashlib.sha256(
-            json.dumps(serializer.validated_data, sort_keys=True, default=str).encode()
+            json.dumps(
+                {"customer_id": str(customer.id), **serializer.validated_data},
+                sort_keys=True, default=str,
+            ).encode()
         ).digest()
 
         # Replay check
@@ -243,9 +273,20 @@ class IssueCreditView(APIView):
                     expires_at=timezone.now() + IDEMPOTENCY_TTL,
                 )
         except IntegrityError:
-            # Concurrent double-click: Credit UNIQUE(customer, key) caught it.
+            # Two possible sources, distinguished by what we find:
+            #  (a) same-customer concurrent double-click → Credit UNIQUE(customer,
+            #      key) fired; the winning credit exists for THIS customer → 200.
+            #  (b) the staff key was already used (e.g. concurrently for another
+            #      customer) → IdempotencyKey UNIQUE(staff, key) fired and our
+            #      credit rolled back; no credit for this customer exists → 409,
+            #      matching the sequential replay-conflict path above.
             existing = (Credit.objects.for_customer(customer)
                         .filter(idempotency_key=idem_key).first())
+            if existing is None:
+                return Response(
+                    {"error": {"code": "idempotency_conflict",
+                               "message": "Idempotency-Key reused with a different payload."}},
+                    status=status.HTTP_409_CONFLICT)
             return Response({
                 "id": str(existing.id),
                 "amount_micro_cents": existing.amount_micro_cents,
@@ -276,6 +317,25 @@ class OverrideLineItemView(APIView):
         new_description = serializer.validated_data.get("description")
         reason = serializer.validated_data["reason"]
         staff_id = request.user.get_username()
+
+        # Optional idempotency: the ops UI sends an Idempotency-Key so a retry of
+        # a money-moving override doesn't write a second audit row. The override
+        # is value-idempotent regardless; this makes the audit trail exact too.
+        idem_key = request.headers.get("Idempotency-Key")
+        body_hash = hashlib.sha256(json.dumps(
+            {"invoice_id": str(invoice_id), "line_item_id": str(line_item_id),
+             **serializer.validated_data},
+            sort_keys=True, default=str).encode()).digest()
+        if idem_key:
+            existing = IdempotencyKey.objects.filter(
+                staff_id=staff_id, key=idem_key).first()
+            if existing:
+                if bytes(existing.request_hash) != body_hash:
+                    return Response(
+                        {"error": {"code": "idempotency_conflict",
+                                   "message": "Idempotency-Key reused with a different payload."}},
+                        status=status.HTTP_409_CONFLICT)
+                return Response(existing.response_body, status=existing.response_status)
 
         with transaction.atomic():
             line_item = (LineItem.objects.select_for_update()
@@ -323,11 +383,20 @@ class OverrideLineItemView(APIView):
                 request_ip=request.META.get("REMOTE_ADDR"),
             )
 
-        return Response({
-            "id": str(line_item.id),
-            "amount_micro_cents": line_item.amount_micro_cents,
-            "description": line_item.description,
-            "overridden_at": line_item.overridden_at.isoformat(),
-            "override_reason": line_item.override_reason,
-            "invoice_total_micro_cents": invoice.total_micro_cents,
-        })
+            response_body = {
+                "id": str(line_item.id),
+                "amount_micro_cents": line_item.amount_micro_cents,
+                "description": line_item.description,
+                "overridden_at": line_item.overridden_at.isoformat(),
+                "override_reason": line_item.override_reason,
+                "invoice_total_micro_cents": invoice.total_micro_cents,
+            }
+            if idem_key:
+                IdempotencyKey.objects.create(
+                    staff_id=staff_id, key=idem_key, method="PATCH",
+                    path=request.path, request_hash=body_hash,
+                    response_status=status.HTTP_200_OK, response_body=response_body,
+                    expires_at=timezone.now() + IDEMPOTENCY_TTL,
+                )
+
+        return Response(response_body)

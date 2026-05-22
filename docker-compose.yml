@@ -70,5 +70,42 @@ services:
       - ./backend:/app
     command: python cron_runner.py
 
+  customer-web:
+    build:
+      context: ./frontend/customer-web
+      dockerfile: Dockerfile
+    environment:
+      # Vite proxies /v1 and /api to the backend over the compose network.
+      VITE_PROXY_TARGET: http://backend:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:5173/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  ops-web:
+    build:
+      context: ./frontend/ops-web
+      dockerfile: Dockerfile
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+    ports:
+      - "5174:5174"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:5174/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
 volumes:
   pg_data:

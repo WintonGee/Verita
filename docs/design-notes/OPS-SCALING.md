@@ -18,7 +18,7 @@
 | `event` rows | — (source of truth) | append-only; no UPDATE/DELETE in app code (only `is_late`/`adjusted_at` flag transitions) |
 | `usage_window.units_consumed` | `event` rows for that hour | `sealed_at IS NULL` (recomputable until invoice issuance) |
 | `invoice.line_items` (usage kind) | `usage_window` × `price_plan` for the period | invoice status `issued` (rewrites require override flow with audit) |
-| `invoice.total_micro_cents` | sum of own line items | always recomputable; reconciliation job auto-fixes drift |
+| `invoice.total_micro_cents` | sum of own line items | recomputable while draft; once issued, the reconciliation job *detects* (does not auto-fix) drift — ops resolves via an audited credit/override |
 | `audit_log` rows | — (source of truth for ops actions) | trigger-blocked UPDATE/DELETE; revoked grants |
 | `webhook_delivery` rows | — (source of truth for inbound webhooks) | unique on `delivery_id` |
 
@@ -43,9 +43,11 @@ GROUP BY customer_id, window_start, uw.units_consumed
 HAVING SUM(units_consumed) <> uw.units_consumed;
 ```
 
-If `delta > 0` and `sealed_at IS NULL`: auto re-aggregate (idempotent).
-If `delta > 0` and `sealed_at IS NOT NULL`: alert; engineer-triggered credit reconciliation.
-Threshold for alert vs page: any sealed-window drift pages immediately.
+If `delta <> 0` and `sealed_at IS NULL`: the window is still open, so the next
+hourly aggregator run recomputes it; reconciliation only flags cases that persist.
+If `delta <> 0` and `sealed_at IS NOT NULL`: alert; engineer-triggered credit
+reconciliation. The reconciliation job itself is read-only — it detects, it does
+not mutate. Threshold for alert vs page: any sealed-window drift pages immediately.
 
 ```sql
 -- Job 2: line-item total vs invoice
@@ -55,7 +57,9 @@ FROM invoice i
 WHERE i.status IN ('issued', 'paid')
 HAVING i.total_micro_cents <> line_sum;
 ```
-Auto-correct: recompute and update the denormalized total, audit row.
+Detected only (the job is read-only): a still-draft invoice is recomputed by
+re-running issuance; an *issued* invoice is corrected via an audited
+override/credit — never a silent UPDATE to a sealed total.
 
 ```sql
 -- Job 3: stuck-state detector
@@ -133,8 +137,8 @@ The rubric line: "how ops debugs a wrong invoice." Walking through:
 
 1. **Customer flags invoice `inv_abc`** (via support or self-service "dispute").
 2. **Ops opens `/ops/customers/{id}` → `inv_abc`**, sees the line-item breakdown.
-3. **Question 1: do line items × tier rates equal the invoice total?** If no, `invoice_total_drift` job has missed; recompute is a one-click "Recompute total" button (audited).
-4. **Question 2: do line-item units match `SUM(usage_window.units_consumed)` for the period?** Drill-down endpoint `/ops/invoices/{id}/drill` returns this comparison. If mismatch → drift between windows and line items at issuance time. Engineer involved.
+3. **Question 1: do line items sum to the invoice total?** The `invoice_total_drift` check (`run_reconciliation`) answers this. If they diverge on an *issued* invoice, correct it with an audited line-item override (`PATCH /ops/invoices/{id}/line-items/{id}`) or a credit — never a silent recompute of a sealed total.
+4. **Question 2: do line-item units match `SUM(usage_window.units_consumed)` for the period?** Run `run_reconciliation` (the `window_drift` check compares window totals to the raw events). A mismatch → drift between windows and line items at issuance time. Engineer involved.
 5. **Question 3: does `SUM(usage_window)` for the period match `SUM(event)`?** Reconciliation job catches this nightly; ops can also trigger on demand. If mismatch and windows are sealed → aggregator missed events.
 6. **Question 4: are there `is_late` events for this period that didn't get adjusted?** Query `event WHERE customer_id=? AND event_timestamp BETWEEN period_start AND period_end AND is_late=true`. If any are unadjusted, they'll roll into next month; explain that to the customer.
 7. **Resolution**:

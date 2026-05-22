@@ -175,3 +175,15 @@ def test_concurrent_issuance_yields_one_invoice(customer_a, api_key_a):
     # At most one may raise IntegrityError (the UNIQUE backstop); the rest
     # return the existing invoice. Net: exactly one invoice.
     assert Invoice.objects.for_customer(customer_a).count() == 1
+
+
+@pytest.mark.django_db
+def test_invoice_period_check_constraint_rejects_empty_period(customer_a):
+    """The DB (not just app code) rejects a non-positive billing period —
+    period_end must be > period_start (mirrors price_tier_end_gt_start)."""
+    from django.db import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        Invoice.objects.create(
+            customer=customer_a, period_start=APRIL_START, period_end=APRIL_START,
+            status=Invoice.Status.DRAFT, currency="USD", total_micro_cents=0)

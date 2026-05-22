@@ -107,6 +107,24 @@ def test_issue_credit_double_click_is_idempotent(ops_client, customer_a):
 
 
 @pytest.mark.django_db
+def test_same_key_different_customer_conflicts(ops_client, customer_a, customer_b):
+    """
+    A staff-scoped idempotency key reused across two customers must not silently
+    return the first customer's response (which would drop the second credit).
+    customer_id is folded into the request hash → 409 conflict.
+    """
+    body = {"amount_micro_cents": 5 * MICRO_CENTS_PER_USD, "reason": "cross-customer key test"}
+    r1 = ops_client.post(f"/ops/customers/{customer_a.id}/credits", body,
+                         format="json", HTTP_IDEMPOTENCY_KEY="shared-key")
+    assert r1.status_code == 201
+    r2 = ops_client.post(f"/ops/customers/{customer_b.id}/credits", body,
+                         format="json", HTTP_IDEMPOTENCY_KEY="shared-key")
+    assert r2.status_code == 409
+    assert Credit.objects.for_customer(customer_a).count() == 1
+    assert Credit.objects.for_customer(customer_b).count() == 0
+
+
+@pytest.mark.django_db
 def test_reused_key_different_body_conflicts(ops_client, customer_a):
     ops_client.post(f"/ops/customers/{customer_a.id}/credits",
                     {"amount_micro_cents": 100, "reason": "first body here ok"},
@@ -145,6 +163,48 @@ def test_concurrent_credit_same_key_one_credit(customer_a, staff_user):
     assert AuditLog.objects.filter(action="credit.issue").count() == 1
 
 
+@pytest.mark.concurrency
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_same_key_across_customers_resolves_to_409_not_500(
+        customer_a, customer_b, staff_user):
+    """Regression: a staff Idempotency-Key reused across two customers
+    concurrently must resolve to one 201 + one 409 — never a dirty 500. The
+    losing thread hits IdempotencyKey UNIQUE(staff, key) (not Credit's unique),
+    and the recovery lookup (scoped to its own customer) finds nothing; that
+    path used to raise AttributeError → 500."""
+    from apps.audit.models import IdempotencyKey
+
+    barrier = threading.Barrier(2)
+    statuses = []
+    lock = threading.Lock()
+
+    def worker(customer):
+        try:
+            barrier.wait()
+            c = APIClient()
+            c.force_authenticate(user=staff_user)
+            resp = c.post(
+                f"/ops/customers/{customer.id}/credits",
+                {"amount_micro_cents": 5 * MICRO_CENTS_PER_USD, "reason": "cross-cust race"},
+                format="json", HTTP_IDEMPOTENCY_KEY="shared-key")
+            with lock:
+                statuses.append(resp.status_code)
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=worker, args=(c,))
+               for c in (customer_a, customer_b)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert 500 not in statuses, statuses
+    assert sorted(statuses) == [201, 409], statuses
+    assert IdempotencyKey.objects.filter(
+        staff_id=staff_user.get_username(), key="shared-key").count() == 1
+
+
 # --- Line-item override ------------------------------------------------------
 
 @pytest.mark.django_db
@@ -161,6 +221,62 @@ def test_override_line_item_recomputes_total_and_audits(ops_client, issued_invoi
     assert audit is not None
     assert audit.before["amount_micro_cents"] == 90 * MICRO_CENTS_PER_USD
     assert audit.after["amount_micro_cents"] == 50 * MICRO_CENTS_PER_USD
+
+
+@pytest.mark.django_db
+def test_override_idempotent_with_key(ops_client, issued_invoice):
+    """A retried override with the same Idempotency-Key writes one audit row."""
+    line = issued_invoice.line_items.first()
+    url = f"/ops/invoices/{issued_invoice.id}/line-items/{line.id}"
+    body = {"amount_micro_cents": 50 * MICRO_CENTS_PER_USD, "reason": "rate correction applied"}
+    r1 = ops_client.patch(url, body, format="json", HTTP_IDEMPOTENCY_KEY="ov-key-1")
+    r2 = ops_client.patch(url, body, format="json", HTTP_IDEMPOTENCY_KEY="ov-key-1")
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.data["id"] == r2.data["id"]
+    assert AuditLog.objects.filter(action="line_item.override").count() == 1
+
+
+@pytest.mark.concurrency
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_line_item_overrides_keep_total_consistent(customer_a, staff_user):
+    """Two concurrent overrides of the same line item must serialize via
+    select_for_update: the invoice total stays equal to the sum of its line
+    items (no lost update), and both money-moving overrides are audited."""
+    inv = Invoice.objects.create(
+        customer=customer_a, period_start=datetime(2026, 4, 1, tzinfo=dt_tz.utc),
+        period_end=datetime(2026, 5, 1, tzinfo=dt_tz.utc), status=Invoice.Status.ISSUED,
+        currency="USD", total_micro_cents=90 * MICRO_CENTS_PER_USD, issued_at=timezone.now())
+    line = LineItem.objects.create(
+        invoice=inv, kind="usage", description="x", units=1,
+        unit_price_micro_cents=0, amount_micro_cents=90 * MICRO_CENTS_PER_USD)
+
+    url = f"/ops/invoices/{inv.id}/line-items/{line.id}"
+    amounts = [50 * MICRO_CENTS_PER_USD, 30 * MICRO_CENTS_PER_USD]
+    barrier = threading.Barrier(2)
+
+    def worker(amount):
+        try:
+            barrier.wait()
+            c = APIClient()
+            c.force_authenticate(user=staff_user)
+            c.patch(url, {"amount_micro_cents": amount,
+                          "reason": f"concurrent override {amount}"}, format="json")
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=worker, args=(a,)) for a in amounts]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    inv.refresh_from_db()
+    line.refresh_from_db()
+    # No lost update: stored total equals the (single) line item amount.
+    assert inv.total_micro_cents == line.amount_micro_cents
+    assert line.amount_micro_cents in amounts
+    # Both money-moving overrides left an audit row.
+    assert AuditLog.objects.filter(action="line_item.override").count() == 2
 
 
 @pytest.mark.django_db

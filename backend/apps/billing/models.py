@@ -88,9 +88,9 @@ class PriceTier(models.Model):
 class Event(models.Model):
     """
     Append-only usage event. `request_id` is the idempotency key for ingest.
-    `is_late` is set TRUE at insert time if the event's hour-window is already
-    sealed (via a subquery in the ingest path); also set TRUE by the invoicer's
-    Step 10 race-closure sweep for events that landed during invoicer txn.
+    `is_late` is set TRUE at insert time iff the event's period has already been
+    invoiced (a subquery in the ingest path, made authoritative by the
+    shared/exclusive seal advisory lock — see views_v1.py / invoicer.py).
     """
     # bigserial; never exposed to clients
     id = models.BigAutoField(primary_key=True)
@@ -113,7 +113,14 @@ class Event(models.Model):
     class Meta:
         db_table = "event"
         constraints = [
-            models.UniqueConstraint(fields=["request_id"], name="event_request_id_unique"),
+            # Scoped per-customer (not global): client request_ids are
+            # globally-unique by convention (UUIDs), but scoping the dedup key
+            # to the tenant prevents a hostile customer from suppressing
+            # another tenant's events by pre-claiming a request_id.
+            models.UniqueConstraint(
+                fields=["customer", "request_id"],
+                name="event_customer_request_id_unique",
+            ),
             models.CheckConstraint(
                 check=models.Q(units_consumed__gte=0),
                 name="event_units_nonneg",
@@ -215,10 +222,19 @@ class Invoice(models.Model):
                 check=models.Q(total_micro_cents__gte=0),
                 name="invoice_total_nonneg",
             ),
+            # Temporal integrity in the schema (mirrors price_tier_end_gt_start):
+            # a billing period must be non-empty. Constraints over comments.
+            models.CheckConstraint(
+                check=models.Q(period_end__gt=models.F("period_start")),
+                name="invoice_period_end_gt_start",
+            ),
         ]
         indexes = [
             models.Index(fields=["status", "period_end"], name="invoice_status_period_idx"),
-            models.Index(fields=["customer", "-period_start"], name="invoice_customer_period_idx"),
+            # The customer invoice list (WHERE customer_id ORDER BY period_start
+            # DESC) is served by the UNIQUE(customer, period_start) index — Postgres
+            # scans it backward for free — so no separate (customer, period_start)
+            # index is needed.
         ]
 
 
@@ -244,9 +260,8 @@ class LineItem(models.Model):
 
     class Meta:
         db_table = "line_item"
-        indexes = [
-            models.Index(fields=["invoice"], name="lineitem_invoice_idx"),
-        ]
+        # No explicit index on `invoice`: Django's FK auto-index on invoice_id
+        # already serves the only access pattern (line items for an invoice).
 
 
 # --- Credits -----------------------------------------------------------------

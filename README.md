@@ -2,8 +2,10 @@
 
 Ingest usage events → aggregate into hourly windows → roll into monthly invoices
 against a tiered price plan, with a payment webhook, a customer dashboard, and
-an internal ops console. Built for the take-home brief; the design write-up is
-in **[DESIGN.md](DESIGN.md)** (start there — it's half the deliverable).
+an internal ops console. Built for the take-home brief.
+
+- **[DESIGN.md](DESIGN.md)** — the design write-up (start here; it's half the deliverable).
+- **[GUIDE.md](GUIDE.md)** — how to *use* the running system (API, dashboards, ops cookbook).
 
 Stack: Django 5 + DRF + Postgres 16, cron-driven background jobs, two
 React + Vite + TypeScript SPAs. Money is integer micro-cents throughout
@@ -20,10 +22,11 @@ React + Vite + TypeScript SPAs. Money is integer micro-cents throughout
 # 1. Config (dev defaults are fine; nothing secret is committed)
 cp .env.example .env
 
-# 2. Bring up Postgres + Django API + the cron sidecar.
-#    First boot creates the Postgres role split (migrator_role / app_role)
-#    and the backend auto-applies migrations. --wait blocks until the API is
-#    healthy (migrated + serving), so the seed below can't race the migration.
+# 2. Bring up the whole stack: Postgres + Django API + cron + both SPAs.
+#    First boot creates the Postgres role split (migrator_role / app_role) and
+#    the backend auto-applies migrations. --wait blocks until everything is
+#    healthy, so the seed below can't race the migration.
+#    (First run builds images — give it a couple minutes.)
 docker compose up -d --wait
 
 # 3. Seed realistic data: customers, API keys, ~thousands of events
@@ -33,11 +36,12 @@ docker compose run --rm backend python manage.py seed --customers=5 --days=45
 # 4. Run the pipeline by hand (cron does this on schedule):
 docker compose run --rm backend python manage.py aggregate_events --catch-up
 docker compose run --rm backend python manage.py issue_invoices
-
-# 5. Front-ends (each in its own terminal):
-cd frontend/customer-web && npm install && npm run dev   # http://localhost:5173
-cd frontend/ops-web      && npm install && npm run dev   # http://localhost:5174
 ```
+
+That's it — open the dashboards (URLs + logins below). The SPAs are served by
+`docker compose` (Vite dev servers, ports 5173 / 5174). For frontend development
+with hot reload you can instead run a SPA directly:
+`cd frontend/customer-web && npm install && npm run dev`.
 
 The seed prints customer logins and **plaintext API keys** (shown once). Defaults:
 
@@ -48,15 +52,16 @@ The seed prints customer logins and **plaintext API keys** (shown once). Default
 | API | http://localhost:8000 | API key `vk_live_…` (from seed output) |
 | API docs (OpenAPI/Swagger) | http://localhost:8000/api/docs/ | — |
 
-> The front-ends run via Vite, which proxies `/v1` and `/ops` to the API on
-> `localhost:8000` (configured in each `vite.config.ts`), so cookies and CSRF
-> work same-origin. The brief calls for minimal, functional front-ends; that's
-> what these are. The core *system* is what `docker compose up` runs.
+> Each SPA's Vite server proxies its API paths to the backend (customer-web →
+> `/v1` + `/api`, ops-web → `/ops` + `/api`), so cookies and CSRF work
+> same-origin. In compose the proxy targets `backend:8000`; run directly it
+> targets `localhost:8000` (`VITE_PROXY_TARGET`). The brief calls for minimal,
+> functional front-ends — that's what these are.
 
 ## Running the tests
 
 ```bash
-docker compose run --rm backend python -m pytest          # all 102
+docker compose run --rm backend python -m pytest          # all 117
 docker compose run --rm backend python -m pytest -m concurrency   # the thread-race tests
 ```
 
@@ -105,7 +110,7 @@ backend/            Django project
                     credit; aggregator / invoicer / pricing / reconciliation
   apps/audit/       audit_log (immutable), webhook_delivery, idempotency_key
   apps/api/         DRF auth, /v1 (customer), /ops (staff), /webhooks
-  tests/            102 tests, organized by correctness boundary
+  tests/            117 tests, organized by correctness boundary
 frontend/customer-web/   dashboard SPA (usage chart, invoices)
 frontend/ops-web/        ops console SPA (customers, credit + override modals)
 ops/postgres/init/       role-split bootstrap (runs on first DB boot)

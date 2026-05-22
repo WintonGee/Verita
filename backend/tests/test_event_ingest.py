@@ -12,14 +12,14 @@ single-process tests here cover the schema-level dedup; the concurrency
 suite proves it under contention.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_tz
 
 import pytest
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.billing.models import Event
+from apps.billing.models import Event, Invoice
 from apps.tenancy.models import Customer
 
 
@@ -96,21 +96,23 @@ def test_replay_batch_is_full_no_op(client, api_key_a):
 
 
 @pytest.mark.django_db
-def test_request_id_globally_unique_across_tenants(client, api_key_a, api_key_b):
+def test_request_id_dedup_is_per_tenant(client, api_key_a, api_key_b):
     """
-    request_id is globally unique per the brief. If two different tenants
-    happen to send the same request_id, the second one is rejected (silently
-    via DO NOTHING). This is the design — request_ids should be UUID-shaped
-    in practice, so collisions are negligible. The test pins the behavior.
+    Dedup is scoped per-customer. Two different tenants sending the same
+    request_id are independent: both are accepted. This prevents a hostile
+    customer from suppressing another tenant's events by pre-claiming a
+    request_id (THREATS.md cross-tenant poisoning). Client request_ids are
+    UUID-shaped in practice, so legitimate cross-tenant collisions don't occur.
     """
-    client.post(URL, {"events": [_event("shared-req")]}, format="json",
-                HTTP_AUTHORIZATION=_auth_header(api_key_a))
-    resp = client.post(URL, {"events": [_event("shared-req")]}, format="json",
-                       HTTP_AUTHORIZATION=_auth_header(api_key_b))
-    assert resp.data["results"][0]["status"] == "duplicate"
-    # Customer A has the row; customer B does not
+    a = client.post(URL, {"events": [_event("shared-req")]}, format="json",
+                    HTTP_AUTHORIZATION=_auth_header(api_key_a))
+    b = client.post(URL, {"events": [_event("shared-req")]}, format="json",
+                    HTTP_AUTHORIZATION=_auth_header(api_key_b))
+    assert a.data["results"][0]["status"] == "accepted"
+    assert b.data["results"][0]["status"] == "accepted"  # not suppressed by A
+    # Each tenant has its own row
     assert Event.objects.for_customer(api_key_a.customer).count() == 1
-    assert Event.objects.for_customer(api_key_b.customer).count() == 0
+    assert Event.objects.for_customer(api_key_b.customer).count() == 1
 
 
 # --- Auth & tenant isolation -------------------------------------------------
@@ -185,3 +187,61 @@ def test_oversized_batch_rejected(client, api_key_a):
     resp = client.post(URL, {"events": events}, format="json",
                        HTTP_AUTHORIZATION=_auth_header(api_key_a))
     assert resp.status_code == 400
+
+
+# --- Seal-race: is_late at ingest is keyed on "period already invoiced" ------
+
+def _issue_invoice(customer, status, start=datetime(2026, 3, 1, tzinfo=dt_tz.utc)):
+    end = start.replace(month=start.month + 1)
+    return Invoice.objects.create(
+        customer=customer, period_start=start, period_end=end,
+        status=status, currency="USD", total_micro_cents=0,
+    )
+
+
+@pytest.mark.django_db
+def test_event_for_already_invoiced_period_is_flagged_late(client, api_key_a):
+    """An event landing in a period that already has an ISSUED invoice is flagged
+    is_late at ingest — even for an hour that never had a window row (the check
+    is per-period, not per-window; the old window-seal check missed this)."""
+    _issue_invoice(api_key_a.customer, Invoice.Status.ISSUED)
+    ts = datetime(2026, 3, 15, 9, 0, tzinfo=dt_tz.utc)  # empty hour, invoiced month
+    resp = client.post(URL, {"events": [_event("late-1", ts=ts)]}, format="json",
+                       HTTP_AUTHORIZATION=_auth_header(api_key_a))
+    assert resp.status_code == 207
+    ev = Event.objects.for_customer(api_key_a.customer).get(request_id="late-1")
+    assert ev.is_late is True
+
+
+@pytest.mark.django_db
+def test_event_for_uninvoiced_period_is_not_late(client, api_key_a):
+    ts = datetime(2026, 3, 15, 9, 0, tzinfo=dt_tz.utc)
+    resp = client.post(URL, {"events": [_event("fresh-1", ts=ts)]}, format="json",
+                       HTTP_AUTHORIZATION=_auth_header(api_key_a))
+    ev = Event.objects.for_customer(api_key_a.customer).get(request_id="fresh-1")
+    assert ev.is_late is False
+
+
+@pytest.mark.django_db
+def test_event_for_draft_invoice_period_is_not_late(client, api_key_a):
+    """A leftover DRAFT (a failed/partial invoicer run) must not prematurely
+    flag events late — only an issued/paid invoice seals the period."""
+    _issue_invoice(api_key_a.customer, Invoice.Status.DRAFT)
+    ts = datetime(2026, 3, 15, 9, 0, tzinfo=dt_tz.utc)
+    resp = client.post(URL, {"events": [_event("draft-1", ts=ts)]}, format="json",
+                       HTTP_AUTHORIZATION=_auth_header(api_key_a))
+    ev = Event.objects.for_customer(api_key_a.customer).get(request_id="draft-1")
+    assert ev.is_late is False
+
+
+@pytest.mark.django_db
+def test_validation_error_envelope_is_clean(client, api_key_a):
+    """A field validation error returns code=validation_failed with structured
+    details and a clean message — never a raw ErrorDetail(...) repr leaked."""
+    resp = client.post(URL, {"events": [_event("bad-1", units=-5)]}, format="json",
+                       HTTP_AUTHORIZATION=_auth_header(api_key_a))
+    assert resp.status_code == 400
+    err = resp.data["error"]
+    assert err["code"] == "validation_failed"
+    assert "ErrorDetail" not in str(resp.data)   # no DRF repr leak
+    assert isinstance(err.get("details"), dict)   # structured per-field details

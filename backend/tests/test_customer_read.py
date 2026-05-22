@@ -152,6 +152,9 @@ def test_invoice_detail_cross_tenant_returns_404(client, customer_a, api_key_a, 
     other = _make_invoice(customer_b, datetime(2026, 4, 1, tzinfo=dt_tz.utc), 50 * MICRO_CENTS_PER_USD)
     resp = client.get(f"/v1/invoices/{other.id}", **_auth(api_key_a))
     assert resp.status_code == 404  # not 403 — existence not confirmed
+    # The error envelope must label it not_found, not internal_error: the scoped
+    # queryset raises Django's Http404, which the handler must map correctly.
+    assert resp.json()["error"]["code"] == "not_found"
 
 
 @pytest.mark.django_db

@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import { apiFetch, ApiError } from '../lib/apiClient';
-import { formatDate, formatMoney, formatUnits } from '../lib/format';
+import { formatDate, formatMoney, formatUnitPrice, formatUnits } from '../lib/format';
 import type { InvoiceDetail as InvoiceDetailType } from '../lib/types';
 import { useMe } from '../hooks/useMe';
 import { Header } from '../components/Header';
@@ -138,10 +138,7 @@ export function InvoiceDetail() {
                               </td>
                               <td className="py-2 pr-4 text-right font-mono text-gray-700">
                                 {li.unit_price_micro_cents != null
-                                  ? formatMoney(
-                                      li.unit_price_micro_cents,
-                                      invoice.currency,
-                                    )
+                                  ? formatUnitPrice(li.unit_price_micro_cents)
                                   : '—'}
                               </td>
                               <td className="py-2 pr-0 text-right font-mono text-gray-900">

@@ -39,10 +39,9 @@ class Customer(models.Model):
 
     class Meta:
         db_table = "customer"
-        indexes = [
-            models.Index(fields=["status"], name="customer_status_idx",
-                         condition=models.Q(status="active")),
-        ]
+        # No secondary index: the customer table is small (~5k rows at target)
+        # and its queries (ops list orders by name + text/status filter; the
+        # invoicer scans all) don't benefit from one. PK is enough.
 
     def __str__(self):
         return f"{self.name} ({self.id})"
@@ -123,9 +122,9 @@ class ApiKey(models.Model):
 
     class Meta:
         db_table = "api_key"
-        indexes = [
-            models.Index(fields=["customer", "revoked_at"], name="apikey_customer_revoked_idx"),
-        ]
+        # Hot-path auth looks up by the unique `prefix`; the ops "keys for this
+        # customer" list rides the FK index on customer_id and orders by
+        # created_at. A (customer, revoked_at) composite matched no query we run.
 
     def __str__(self):
         active = "revoked" if self.revoked_at else "active"

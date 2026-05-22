@@ -3,8 +3,9 @@ Monthly invoicer: usage_windows → invoice + line_items.
 
 Per-customer, fully transactional, idempotent. Sequence (see PIPELINE.md §3):
 
-  1. per-customer advisory xact lock (serializes against aggregator + other
-     invoicer runs for this customer)
+  1. per-customer advisory xact locks: the billing lock (serializes against the
+     aggregator + other invoicer runs) and the EXCLUSIVE seal lock (excludes
+     concurrent ingest, which holds it in SHARED mode — see views_v1.py)
   2. idempotency check — if an invoice already exists for (customer, period),
      return it (no-op)
   3. re-aggregate the period (idempotent UPSERT) so windows reflect every
@@ -15,11 +16,17 @@ Per-customer, fully transactional, idempotent. Sequence (see PIPELINE.md §3):
   7. apply pending credits
   8. roll up total, mark issued
   9. seal the period's windows
-  10. race-closure sweep: flip is_late for events ingested during this txn
-  11. write audit row
+  10. write audit row
 
-Idempotency rests on (a) the advisory lock, (b) the existence check, and
+Idempotency rests on (a) the advisory locks, (b) the existence check, and
 (c) the UNIQUE(customer, period_start) constraint as a hard backstop.
+
+Seal-race correctness: because ingest holds the seal lock SHARED and we hold it
+EXCLUSIVE, no ingest can interleave with steps 3-9. An event therefore either
+commits before our exclusive lock (so step 3 re-aggregates it onto this invoice)
+or after we release (so its ingest sees this issued invoice and self-flags
+is_late, to be adjusted next period). No event is lost or double-billed; no
+wall-clock sweep is needed.
 """
 
 import logging
@@ -93,13 +100,21 @@ def issue_monthly_invoice(customer, period_start, period_end, now=None):
     Returns the Invoice instance.
     """
     now = now or timezone.now()
-    txn_started_at = now
 
     with transaction.atomic():
         with connection.cursor() as cur:
+            # Billing lock: serialize against the aggregator + other invoicer
+            # runs for this customer.
             cur.execute(
                 "SELECT pg_advisory_xact_lock(hashtext(%s))",
                 [f"verita:billing:{customer.id}"],
+            )
+            # Seal lock (EXCLUSIVE): ingest holds this SHARED, so taking it
+            # exclusive drains in-flight ingests and blocks new ones until we
+            # commit — closing the seal race by construction.
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                [f"verita:seal:{customer.id}"],
             )
 
             # 2. Idempotency: already issued for this period?
@@ -206,19 +221,15 @@ def issue_monthly_invoice(customer, period_start, period_end, now=None):
              .update(applied_to_invoice=invoice))
 
         # 9. Seal the period's windows (idempotent: WHERE sealed_at IS NULL).
+        #    Safe under the exclusive seal lock: no ingest can add a window to
+        #    this period concurrently. Events arriving after we commit see the
+        #    issued invoice and self-flag is_late at ingest (no sweep needed).
         (UsageWindow.objects.for_customer(customer)
          .filter(window_start__gte=period_start, window_start__lt=period_end,
                  sealed_at__isnull=True)
          .update(sealed_at=now))
 
-        # 10. Race-closure: any event in this period ingested AFTER our txn
-        #     started, still is_late=False, gets flipped → next period adjusts.
-        (Event.objects.for_customer(customer)
-         .filter(event_timestamp__gte=period_start, event_timestamp__lt=period_end,
-                 is_late=False, ingested_at__gt=txn_started_at)
-         .update(is_late=True))
-
-        # 11. Audit
+        # 10. Audit
         write_audit(
             actor_type="system",
             actor_id="invoicer",

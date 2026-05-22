@@ -20,11 +20,15 @@ import pytest
 from django.test import Client
 from django.utils import timezone
 
+from django.conf import settings
+
 from apps.audit.models import AuditLog, WebhookDelivery
 from apps.billing.models import Invoice
 from apps.billing.money import MICRO_CENTS_PER_USD
 
-WEBHOOK_SECRET = "dev-webhook-secret-current"  # matches settings_test inheritance
+# Read the configured secret so the test signs exactly as the backend verifies,
+# regardless of what .env sets it to.
+WEBHOOK_SECRET = settings.WEBHOOK_SECRET_CURRENT
 URL = "/webhooks/payments"
 
 

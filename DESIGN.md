@@ -6,6 +6,24 @@ Designed for the stated target — 5,000 customers, 200 events/s sustained
 contractual — as a single-Postgres system with strong correctness and a clear
 path to scale. Money is integer micro-cents throughout (1 unit = $1e-8).
 
+**Pipeline at a glance.** Three scheduled jobs move data left-to-right. Each box
+is a table; the line beneath it is that table's mutability rule.
+
+```
+   POST /v1/events         aggregate_events          issue_invoices
+   (idempotent ingest)     (hourly cron)             (monthly cron)
+          |                       |                         |
+          v                       v                         v
+     +---------+   rolls   +--------------+   rolls   +-------------------+
+     |  event  | --------> | usage_window | --------> | invoice/line_item |
+     +---------+           +--------------+           +-------------------+
+     append-only           recomputable              immutable once issued;
+     source of truth       until sealed              edit only via audited
+                                                      line-item override
+
+   payment: POST /webhooks/payments (signed, replay-safe) marks issued -> paid
+```
+
 ## 1. Data model
 
 The spine is `event → usage_window → invoice/line_item`, with `customer`,
@@ -20,7 +38,8 @@ Every money column is `bigint` micro-cents; bigint's max ÷ 1e8 ≈ $92B per row
 ample for any invoice. Floats are used only for display formatting.
 
 **Indexes match the queries actually run.** Each earns its place:
-- `event UNIQUE(request_id)` — the ingest idempotency primitive.
+- `event UNIQUE(customer_id, request_id)` — the ingest idempotency primitive,
+  scoped per-tenant (see §2/§5: prevents cross-tenant request_id poisoning).
 - `event(customer_id, event_timestamp DESC)` — `GET /v1/usage` and per-customer
   aggregation.
 - `event(api_key_id, event_timestamp DESC)` — `/v1/usage?api_key_id=`.
@@ -53,44 +72,57 @@ and the queries don't change, only where the bytes sit.
 Idempotency lives in the schema, not in application bookkeeping. Five replay
 scenarios, each closed and tested:
 
-**Event ingestion replayed.** `INSERT … ON CONFLICT(request_id) DO NOTHING`
-in one multi-row statement. Re-delivery is a silent no-op; the response reports
-`accepted`/`duplicate` per request_id. A 20-thread test hammering the same
-request_id leaves exactly one row — the unique index serializes, no app lock.
+**Event ingestion replayed.** `INSERT … ON CONFLICT(customer_id, request_id)
+DO NOTHING` in one multi-row statement. Re-delivery is a silent no-op; the
+response reports `accepted`/`duplicate` per request_id. A 20-thread test
+hammering the same request_id leaves exactly one row — the unique index
+serializes, no app lock. The dedup key is scoped to the tenant: request_ids are
+globally-unique by client convention (UUIDs), but scoping the constraint stops
+a hostile customer from suppressing another tenant's event by pre-claiming its
+request_id (§5). (`tests/test_concurrency.py`, `tests/test_event_ingest.py`)
 
 **Aggregator runs twice.** A global `pg_try_advisory_lock` makes a second
 invocation return immediately. The work is an idempotent UPSERT recomputing the
 full window sum, guarded by `WHERE usage_window.sealed_at IS NULL`, so sealed
 windows are immutable and re-runs produce identical totals.
+(`tests/test_aggregator.py`: `test_rerun_produces_same_total`, `test_sealed_window_is_not_recomputed`)
 
 **Webhook delivered three times.** `webhook_delivery UNIQUE(delivery_id)`
 catches replays; inside the transaction we re-check `invoice.status` and no-op
 if already paid. Tested: three deliveries → one `issued→paid` transition, one
-audit row, two no-ops.
+audit row, two no-ops. (`tests/test_webhook.py::test_replay_same_delivery_id_three_times`)
 
 **Ops clicks "issue credit" twice.** A required `Idempotency-Key` header keys a
 staff-scoped `idempotency_key` row that stores the response; a replay returns it
 verbatim, and a reused key with a *different* body returns 409. The DB backstop
 is `credit UNIQUE(customer_id, idempotency_key)`: a 6-thread concurrent test
 produces exactly one credit and one audit row.
+(`tests/test_ops.py`: `test_concurrent_credit_same_key_one_credit`, `test_issue_credit_double_click_is_idempotent`)
 
 **Invoicer runs twice for a period.** Per-customer `pg_advisory_xact_lock` +
 an existence check inside the lock + `UNIQUE(customer_id, period_start)` as a
 hard backstop. An 8-thread concurrent test yields exactly one invoice.
+(`tests/test_invoicer.py::test_concurrent_issuance_yields_one_invoice`)
 
 Lock primitives: `pg_try_advisory_lock` (cron singletons), `pg_advisory_xact_lock`
-(per-customer serialization, auto-released on commit), `SELECT … FOR UPDATE`
+(per-customer serialization, auto-released on commit; **shared** on the ingest
+path, **exclusive** on the invoicer's seal step — below), `SELECT … FOR UPDATE`
 (line-item edits, window reads), and unique constraints (every dedup key).
 
-**The one honest correctness boundary.** Ingestion is intentionally lockless —
-the hot path can't afford a per-customer lock at 2,000/s. So an event can land
-during the invoicer's seal step with `is_late=false` even though its window is
-about to seal. The invoicer closes this in-transaction (step 10): just before
-commit it flips `is_late=true` for any event in the period with
-`ingested_at > txn_started_at`. Those become next month's adjustment line.
-Per-invoice correctness is therefore *eventual*; aggregate correctness across
-consecutive invoices is *exact*. This is the deliberate trade and it's
-documented where it lives.
+**The seal race — closed by construction.** Ingestion can't afford an *exclusive*
+per-customer lock at 2,000/s. But it can afford a **shared** advisory lock:
+shared holders don't conflict with each other, so 2,000/s ingest stays fully
+concurrent. The monthly invoicer takes that same lock **exclusive** around its
+re-aggregate→seal steps. So an event either commits *before* the exclusive lock
+(step 3 re-aggregates it onto this invoice) or *after* we release (its ingest
+sees the now-issued invoice and self-flags `is_late`, adjusted next period — the
+ingest check is "has this period been invoiced?", so an empty hour-window can't
+hide it). No event is lost or double-billed. Per-invoice correctness is *exact*
+for everything that arrived before issuance; genuinely-late arrivals are *exact*
+across consecutive invoices via the adjustment line. The cost is one cheap
+shared-lock acquisition per ingest — far less than the per-event exclusive lock a
+naive design would reach for, and it removes the wall-clock sweep entirely
+(`tests/test_concurrency.py`, `tests/test_invoicer.py`).
 
 ## 3. Aggregation pipeline
 
@@ -114,7 +146,8 @@ hard-immutable (below).
 the next invoice as a `kind='adjustment'` line at the customer's current
 marginal rate. Drift is caught by three read-only daily reconciliation checks:
 event-sum vs window total (paging if the window is sealed), invoice total vs
-line-item sum, and stuck-draft detection. These three queries are also the
+line-item sum, and stuck-draft detection (`tests/test_reconciliation.py`).
+These three queries are also the
 "debug a wrong invoice" runbook — walk them top-down to localize where a number
 diverged, then correct with a credit (never a silent edit to a sealed invoice).
 
@@ -140,15 +173,42 @@ per-customer dispatch via `SELECT … FOR UPDATE SKIP LOCKED` over a claim queue
 N workers → N×. This is the point where Celery earns its place; before it,
 cron + advisory locks is simpler and sufficient.
 
+**Where these numbers come from** (back-of-envelope, not yet load-tested): each
+ingest insert touches the `UNIQUE(customer_id, request_id)` B-tree plus two
+secondary indexes (~3 index writes/event); at 3k/s that's ~9k index-IOPS, which
+is roughly where a single commodity-RDS writer's IOPS + WAL saturate — hence the
+~3k/s ceiling. The ~600ms/customer invoicer cost is one read of a month of
+windows (≤744 rows/customer) + tiered compute + a handful of inserts in one
+transaction. Turning these estimates into measured numbers (drive the seed
+generator + time it) is a named follow-up.
+
+**Observability — what we'd alert on.** Prometheus counters on the hot paths,
+structured logs with a `trace_id`, and the daily reconciliation as the backstop.
+The page-vs-warn split:
+
+| Signal | Threshold | Sev | Why |
+|---|---|---|---|
+| `invoicer.failed_run` | any | **page** | a financial cron failed |
+| `drift.window` (sealed) | > 0.5% | **page** | a sealed-window invariant broke |
+| `aggregator.failed_runs` | ≥ 3 in a row | **page** | pipeline is broken |
+| `webhook.invalid_signature_rate` | > 5%/hr | **page** | attack or botched secret rotation |
+| `event.ingest_5xx` | > 0.1%/min | **page** | data plane breaking |
+| `aggregator.lag` | > 2 h | warn | dashboard data going stale |
+| `idempotency_key.collision_with_diff_body` | any | warn | a client bug worth surfacing |
+
+(Fuller table + the "debug a wrong invoice" runbook in `docs/design-notes/OPS-SCALING.md`.)
+
 ## 5. Threat model
 
 **Hostile customer (valid API key).** Cross-tenant reads are blocked at the
 `CustomerScopedManager` — a bare `.objects` query *raises*; only `.for_customer()`
 returns rows, and a guessed UUID for another tenant returns 404, not 403, so
 existence isn't confirmed. The `customer_id` is taken from the authenticated key,
-never from request input. Replays dedup on `request_id`; negative units hit a
-CHECK; a forged webhook fails HMAC; brute-forcing a 190-bit key or the
+never from request input. Replays dedup on `(customer_id, request_id)` — scoped
+per tenant so A can't suppress B's events by pre-claiming a request_id; negative
+units hit a CHECK; a forged webhook fails HMAC; brute-forcing a 128-bit key or the
 rate-limited login (5/min/IP) is infeasible.
+(`tests/test_tenant_scoping.py`, `tests/test_unsafe_allowlist.py`)
 
 **Hostile insider (valid staff).** Can't be prevented, so it's made undeniable:
 every credit and override writes an `audit_log` row — actor, IP, before/after,
@@ -159,6 +219,7 @@ connects as `app_role`; migrations run as a separate `migrator_role`. A
 SQL-injected app connection still cannot alter history. There is deliberately no
 ops endpoint to mark an invoice paid — only the signed webhook can — so an
 insider can't fake payment without leaving the audit trail of a credit/override.
+(`tests/test_audit_immutability.py`, `tests/test_role_split.py`)
 
 **Compromised webhook source (leaked HMAC secret).** Blast radius is one
 transition (`issued→paid`); the payload amount is verified against the invoice
@@ -181,26 +242,43 @@ stuck-draft reconciliation check. Celery would add a broker and a worker tier to
 debug for visibility we don't yet need; it becomes worth it at the 50k-customer
 parallel-invoicer point, and the migration is additive.
 
-**SHA-256 over bcrypt for API keys.** API keys are 190-bit random secrets, not
+**SHA-256 over bcrypt for API keys.** API keys are 128-bit random secrets, not
 human passwords, so bcrypt's deliberate slowness defends against nothing here
 while taxing every request's auth lookup. We keep argon2id for customer
 *passwords*, which are guessable. (A DB dump exposes only hashes either way.)
 
-**Lockless ingest + invoicer sweep over locked ingest.** Forcing a per-customer
-lock on every event would make ingest correct-by-construction but cost ~0.5ms on
-the 2,000/s hot path to defend against a race that only opens once a month at
-seal time. We took the lockless path and absorb the race in the invoicer,
-accepting eventual per-invoice / exact-aggregate correctness.
+**Shared-lock ingest + exclusive-lock seal over the two obvious alternatives.**
+The seal race (an event committing while the invoicer seals) has two naive fixes,
+both bad: a per-event *exclusive* lock serializes ingest and taxes the 2,000/s
+hot path; a lockless ingest plus a wall-clock "flip late after my start time"
+sweep is subtly wrong — it compares the app-server clock to the DB's
+`ingested_at` and can both miss events and double-flip them. We instead take the
+advisory lock **shared** on ingest (shared holders don't conflict, so ingest
+stays fully concurrent) and **exclusive** on the invoicer's seal — closing the
+race by construction for the cost of one cheap shared-lock acquisition per
+request. See §2.
 
-**Front-ends via Vite over front-ends in compose.** `docker compose up` runs the
-core system (DB, API, cron); the two SPAs run via `npm run dev`, with Vite
-proxying `/v1` and `/ops` to the API so cookies and CSRF are same-origin. The
-alternative — serving built SPAs behind nginx inside compose — means proxying
-Django's CSRF-protected session through nginx with the right `Host`/`Origin`
-headers, which is fiddly and easy to get subtly wrong on a reviewer's first run.
-Given the brief frames the front-ends as "minimal, functional," the proven
-Vite-proxy path (verified end-to-end, including the ops credit flow) was the
-lower-risk choice; containerizing them is a known, additive follow-up.
+**Front-ends in compose as Vite dev servers, not nginx-static.** `docker compose
+up` brings up everything including both SPAs, each a Vite dev server whose proxy
+forwards its API paths to `backend:8000` (cookies + CSRF stay same-origin). The
+rejected alternative — building the SPAs and serving them behind nginx — means
+proxying Django's CSRF-protected session through nginx with the right
+`Host`/`Origin` headers, which is fiddly and easy to get subtly wrong. Running
+Vite in the container keeps the proven same-origin proxy with one knob
+(`VITE_PROXY_TARGET`) and no nginx. Honest cost: it's a dev server, not a
+production build — fine for a demo; a real deploy would ship static assets via a
+CDN with `CSRF_TRUSTED_ORIGINS` set to the real origins.
+
+**What I'd do differently.** Three honest reflections. (1) `Idempotency-Key` is
+*required* on credit issuance but only *honored-if-present* on line-item override
+— overrides are value-idempotent so it's defensible, but a uniform money-moving
+contract would require it on both. (2) The §4 scaling ceilings are reasoned, not
+measured; with more time I'd add a seed-driven load-test harness and replace the
+back-of-envelope numbers with real ones. (3) The exclusive seal lock briefly
+blocks a customer's *own* ingest during their monthly invoice (sub-second); fine
+at this scale, but at very high per-customer ingest rates I'd shrink that window
+by computing totals first and holding the exclusive lock only across the seal
+write itself.
 
 ## 7. What I didn't build, and would build next
 

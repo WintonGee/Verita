@@ -40,22 +40,33 @@ class CustomerScopedManager(models.Manager):
 
     def unsafe_all_tenants(self):
         """
-        Explicit cross-tenant queryset. Use only in:
-          - cron tasks that intentionally iterate all tenants
-          - ops viewsets (staff already has cross-tenant authority)
-          - reconciliation reports
-        Grep for this method name to enumerate all call sites.
+        Explicit cross-tenant queryset. Current call sites (all system contexts
+        with no per-request tenant): the payment webhook (looks up an invoice by
+        id) and the reconciliation cron (drift report over all tenants). Ops
+        views resolve the customer first and then use .for_customer(). Grep for
+        this method name to enumerate all call sites; a meta-test pins the list.
         """
         return super().get_queryset()
 
     # --- Writes -------------------------------------------------------------
-    # Writes always require an explicit `customer` kwarg, so they cannot leak
-    # another tenant's data. They bypass the read trap (get_queryset) so the
-    # normal ORM ergonomics keep working. The footgun we're guarding against
-    # is READS that forget a scope, not writes.
+    # Writes bypass the read trap (get_queryset) so normal ORM ergonomics keep
+    # working, but they ENFORCE an explicit customer scope rather than trusting
+    # convention: a create/bulk_create without a customer raises, so a write
+    # can't silently land unscoped (or, worse, with a forgotten/wrong tenant).
 
     def create(self, **kwargs):
+        if not (kwargs.get("customer") is not None or kwargs.get("customer_id")):
+            raise CustomerScopeMissing(
+                f"{self.model.__name__}.objects.create() requires an explicit "
+                f"customer (or customer_id)."
+            )
         return super().get_queryset().create(**kwargs)
 
     def bulk_create(self, objs, *args, **kwargs):
+        objs = list(objs)
+        if any(getattr(o, "customer_id", None) is None for o in objs):
+            raise CustomerScopeMissing(
+                f"{self.model.__name__}.objects.bulk_create() requires every "
+                f"object to have a customer set."
+            )
         return super().get_queryset().bulk_create(objs, *args, **kwargs)

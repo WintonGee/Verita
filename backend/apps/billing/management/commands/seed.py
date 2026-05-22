@@ -36,6 +36,7 @@ from apps.billing.models import (
     PriceTier,
     UsageWindow,
 )
+from apps.audit.models import IdempotencyKey
 from apps.tenancy.models import ApiKey, Customer, CustomerUser
 
 # Default password for every seeded login (demo data only).
@@ -130,6 +131,9 @@ class Command(BaseCommand):
             # Events / windows reference Customer + ApiKey via RESTRICT.
             Event.objects.unsafe_all_tenants().delete()
             UsageWindow.objects.unsafe_all_tenants().delete()
+            # Idempotency keys RESTRICT-reference Customer (created by ops credit
+            # issuance), so they must go before the customers they belong to.
+            IdempotencyKey.objects.all().delete()
             # Tenancy: keys + users before the customer they belong to.
             ApiKey.objects.all().delete()
             CustomerUser.objects.all().delete()

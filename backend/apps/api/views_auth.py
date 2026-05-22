@@ -21,6 +21,7 @@ from rest_framework.views import APIView
 
 from apps.api.auth import (
     CUSTOMER_SESSION_COOKIE,
+    ApiKeyAuthentication,
     CustomerSessionAuthentication,
     hash_session_token,
 )
@@ -131,7 +132,6 @@ class LogoutView(APIView):
 
 class MeView(APIView):
     # API key OR session cookie both work here.
-    from apps.api.auth import ApiKeyAuthentication
     authentication_classes = [ApiKeyAuthentication, CustomerSessionAuthentication]
     permission_classes = [HasCustomerScope]
 

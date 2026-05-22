@@ -4,14 +4,15 @@ Customer-facing /v1 endpoints.
 POST /v1/events is the workhorse: batched, idempotent, hot-path. The
 idempotency guarantee is the schema's UNIQUE(request_id), not application
 locking. The hot path is a single multi-row INSERT with ON CONFLICT DO NOTHING
-+ a subquery that computes `is_late` (sealed-window check) per event.
++ a subquery that computes `is_late` (already-invoiced check) per event, under a
+shared advisory lock that coordinates with the invoicer's exclusive seal lock.
 """
 
 import base64
 import json
 from datetime import datetime, timezone as dt_tz
 
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Count, Sum
 from django.db.models.functions import Trunc
 from django.utils.dateparse import parse_datetime
@@ -79,17 +80,24 @@ class EventIngestView(APIView):
             SELECT
                 %s::uuid, %s::uuid, r.request_id, r.endpoint,
                 r.units, r.ts, NOW(),
-                COALESCE(
-                    (SELECT sealed_at IS NOT NULL FROM usage_window
-                       WHERE customer_id = %s::uuid
-                         AND window_start = date_trunc('hour', r.ts)),
-                    FALSE
+                -- An event is "late" iff the period containing it has already
+                -- been invoiced. The shared/exclusive seal lock makes this check
+                -- authoritative: an event either commits before the invoicer's
+                -- exclusive lock (and is billed on that invoice) or after it
+                -- (and sees the issued invoice here -> flagged late, adjusted
+                -- next period). Never lost, never double-billed. A non-existent
+                -- hour-window no longer hides a late event (the old check did).
+                EXISTS(
+                    SELECT 1 FROM invoice
+                     WHERE customer_id = %s::uuid
+                       AND period_start <= r.ts AND period_end > r.ts
+                       AND status <> 'draft'
                 ),
                 NULL
             FROM UNNEST(
                 %s::text[], %s::text[], %s::integer[], %s::timestamptz[]
             ) AS r(request_id, endpoint, units, ts)
-            ON CONFLICT (request_id) DO NOTHING
+            ON CONFLICT (customer_id, request_id) DO NOTHING
             RETURNING request_id
         """
         params = [
@@ -97,9 +105,19 @@ class EventIngestView(APIView):
             request_ids, endpoints, units, timestamps,
         ]
 
-        with connection.cursor() as cur:
-            cur.execute(sql, params)
-            inserted = {row[0] for row in cur.fetchall()}
+        # Shared seal lock: ingests run concurrently with each other (shared
+        # locks don't conflict), but the monthly invoicer takes the EXCLUSIVE
+        # lock on this key, so ingest and the seal step can't interleave. Held
+        # until commit, so the EXISTS check above and the insert are atomic
+        # w.r.t. the invoicer.
+        with transaction.atomic():
+            with connection.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock_shared(hashtext(%s))",
+                    [f"verita:seal:{customer_id}"],
+                )
+                cur.execute(sql, params)
+                inserted = {row[0] for row in cur.fetchall()}
 
         # An input batch may contain the same request_id more than once
         # (poor client behavior, but legitimately a retry that got merged).

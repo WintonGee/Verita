@@ -103,11 +103,8 @@ def test_charge_is_monotonic(units):
     assert compute_tiered_charge(DEFAULT_TIERS, units) >= compute_tiered_charge(DEFAULT_TIERS, units - 1)
 
 
-@given(
-    units=st.integers(min_value=0, max_value=10**9),
-    sum_of_line_units=st.just(None),
-)
-def test_line_item_units_sum_to_total(units, sum_of_line_units):  # noqa: ARG001
+@given(units=st.integers(min_value=0, max_value=10**9))
+def test_line_item_units_sum_to_total(units):
     charges = compute_tiered_line_items(DEFAULT_TIERS, units)
     assert sum(c.units for c in charges) == units
 
