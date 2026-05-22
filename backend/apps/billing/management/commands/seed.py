@@ -92,7 +92,10 @@ class Command(BaseCommand):
         for i in range(1, n_customers + 1):
             customer, login_email, plaintext_keys, api_keys = \
                 self._create_customer(i, plan)
-            inserted = self._seed_events(customer, api_keys, n_days, now)
+            # Give the first customer a usage spike TODAY so the ops console's
+            # anomaly badge (today > 10x the 30-day average) is demonstrable.
+            inserted = self._seed_events(customer, api_keys, n_days, now,
+                                         spike_today=(i == 1))
             total_events += inserted
             summaries.append({
                 "name": customer.name,
@@ -237,12 +240,16 @@ class Command(BaseCommand):
 
     # --- Events --------------------------------------------------------------
 
-    def _seed_events(self, customer, api_keys, n_days, now):
+    def _seed_events(self, customer, api_keys, n_days, now, spike_today=False):
         """
         Generate a substantial-but-fast batch of events for one customer,
         spread across the last n_days. Inserts via bulk_create with
         ignore_conflicts=True (matches the ON CONFLICT DO NOTHING ingest path),
         so duplicate request_ids are silently skipped.
+
+        If spike_today, append a burst of events dated today large enough that
+        today's usage exceeds 10x the customer's 30-day daily average — so the
+        ops anomaly badge is actually demonstrable in the demo.
 
         Returns the number of rows actually inserted.
         """
@@ -301,6 +308,28 @@ class Command(BaseCommand):
             if len(batch) >= BATCH_SIZE:
                 inserted += self._flush(customer, batch)
                 batch = []
+
+        # Anomaly demo: a burst of events dated TODAY. ~12x the daily event
+        # count at larger units pushes today's total well past 10x the 30-day
+        # average, so the ops anomaly badge fires. (Front-loaded history only
+        # lowers the average, so this stays comfortably above the threshold.)
+        if spike_today:
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            span = max(now - today_start, timedelta(minutes=1))
+            for _ in range(baseline_per_day * 12):
+                frac = secrets.randbelow(10_000) / 10_000.0
+                ts = today_start + span * frac  # always within today, <= now
+                batch.append(Event(
+                    customer=customer,
+                    api_key=secrets.choice(api_keys),
+                    request_id=uuid.uuid4().hex,
+                    endpoint=secrets.choice(ENDPOINTS),
+                    units_consumed=secrets.choice(range(25, 51)),
+                    event_timestamp=ts,
+                ))
+                if len(batch) >= BATCH_SIZE:
+                    inserted += self._flush(customer, batch)
+                    batch = []
 
         if batch:
             inserted += self._flush(customer, batch)
